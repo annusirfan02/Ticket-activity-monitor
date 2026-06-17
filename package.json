@@ -1,0 +1,21 @@
+{
+  "name": "employee-activity-monitor",
+  "version": "1.0.0",
+  "description": "Freshdesk agent inactivity monitor with Slack alerts",
+  "main": "api/index.js",
+  "scripts": {
+    "dev": "node api/server.js",
+    "start": "node api/server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "node-cron": "^3.0.3",
+    "pdfkit": "^0.15.0"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}

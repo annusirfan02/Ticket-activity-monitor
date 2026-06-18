@@ -4,6 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const axios   = require('axios');
 const path    = require('path');
+const crypto  = require('crypto');
 const D        = require('./db');
 const R        = require('./report');
 
@@ -624,16 +625,33 @@ async function runPoll() {
 }
 
 // ── AUTH ──
-const sessions = new Set();
-const mkTok = () => Math.random().toString(36).slice(2)+Date.now().toString(36);
+// Stateless signed tokens (HMAC). No in-memory store, so they work across
+// Vercel's serverless instances — otherwise a request landing on a different
+// instance than the one that issued the token would 401 and log the user out.
+const SESSION_SECRET = process.env.SESSION_SECRET || process.env.ADMIN_PASSWORD || process.env.CRON_SECRET || 'dev-secret';
+const SESSION_TTL_MS = 7 * 24 * 3600 * 1000; // 7 days
+const mkTok = () => {
+  const exp = Date.now() + SESSION_TTL_MS;
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(String(exp)).digest('hex');
+  return `${exp}.${sig}`;
+};
+function verifyTok(t){
+  if (!t || typeof t !== 'string' || t.indexOf('.') < 0) return false;
+  const [expStr, sig] = t.split('.');
+  const exp = parseInt(expStr, 10);
+  if (!exp || Date.now() > exp) return false;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(String(exp)).digest('hex');
+  if (!sig || sig.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+}
 app.post('/api/login', (req,res)=>{
   const { email, password } = req.body||{};
   if ((email||'').toLowerCase()===(process.env.ADMIN_EMAIL||'').toLowerCase() && password===process.env.ADMIN_PASSWORD) {
-    const t = mkTok(); sessions.add(t); return res.json({ ok:true, token:t });
+    return res.json({ ok:true, token: mkTok() });
   }
   res.status(401).json({ ok:false, error:'Invalid credentials' });
 });
-function authMw(req,res,next){ const t=req.headers['x-auth-token']; if(t&&sessions.has(t))return next(); res.status(401).json({ok:false,error:'Unauthorized'}); }
+function authMw(req,res,next){ const t=req.headers['x-auth-token']; if(verifyTok(t))return next(); res.status(401).json({ok:false,error:'Unauthorized'}); }
 
 app.get('/api/status', authMw, async (req,res)=>{
   try {

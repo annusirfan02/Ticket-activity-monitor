@@ -534,7 +534,14 @@ async function runPoll() {
     if (m.lastSeen && m.lastSeen > (lastSeen||0)) lastSeen = m.lastSeen;
     let { alertedAt } = prev;
     if (alertedAt && lastSeen && lastSeen > alertedAt) alertedAt = null;
-    const idleMs = lastSeen ? now-lastSeen : null;
+    // Idle is only meaningful DURING the shift: activity before shift start
+    // (e.g. the previous day) must not count. So measure idle from the later
+    // of (last activity, shift start) — otherwise an agent shows as hours-idle
+    // the moment their shift begins.
+    const idleBaseline = (ms.monitor && ms.shift)
+      ? Math.max(lastSeen || 0, ms.shift.startTs)
+      : lastSeen;
+    const idleMs = idleBaseline ? now-idleBaseline : null;
     const isIdle = idleMs==null || idleMs>threshold;
 
     if (ms.monitor && isIdle && !alertedAt) {
@@ -589,7 +596,9 @@ async function runPoll() {
     // idle_start = last ticket activity (or shift start if none); the episode
     // extends each poll while still idle. Only while genuinely on-shift.
     if (ms.monitor && (idleMs == null || idleMs >= threshold)) {
-      const idleStartTs = lastSeen || (ms.shift ? ms.shift.startTs : winStart);
+      const rawStart = lastSeen || (ms.shift ? ms.shift.startTs : winStart);
+      // Never log idle time from before the shift began.
+      const idleStartTs = ms.shift ? Math.max(rawStart, ms.shift.startTs) : rawStart;
       try {
         await D.upsertIdleLog({
           agent_email: email, agent_name: name, log_date: today, month_key: today.slice(0,7),

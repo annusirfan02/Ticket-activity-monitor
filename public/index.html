@@ -467,7 +467,7 @@ function renderStatus(agents){
   let list = agents;
   if (statFilter && statFilter!=='all') {
     list = agents.filter(a => statFilter==='break'
-      ? (a.onBreak && !a.flaggedLate)
+      ? a.onBreak
       : statFilter==='break-late'
       ? a.flaggedLate
       : a.status===statFilter);

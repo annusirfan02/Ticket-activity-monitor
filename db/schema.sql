@@ -184,6 +184,21 @@ create table if not exists group_daily_stats (
 create index if not exists idx_group_stats_date  on group_daily_stats(stat_date);
 create index if not exists idx_group_stats_group on group_daily_stats(group_id);
 
+-- ── Rostered shifts with no clock-in and no leave (possible absences) ──
+-- Logged by the poll once a shift has ended; see api/attendance.js for the rule.
+create table if not exists missed_shifts (
+  id              bigint generated always as identity primary key,
+  agent_email     text not null,
+  agent_name      text,
+  log_date        date not null,        -- date of the scheduled start in DISPLAY_TZ
+  month_key       text not null,
+  scheduled_start timestamptz not null,
+  scheduled_end   timestamptz,
+  created_at      timestamptz default now(),
+  unique (agent_email, scheduled_start)
+);
+create index if not exists idx_missed_date on missed_shifts(log_date);
+
 create index if not exists idx_late_email   on late_shifts(agent_email);
 create index if not exists idx_late_month    on late_shifts(month_key);
 create index if not exists idx_sla_email      on sla_daily(agent_email);

@@ -74,12 +74,13 @@ async function buildReports(fromDate, toDate, options, monthKey) {
   for (const r of thRows) thresholds[r.metric] = { green_max: +r.green_max, yellow_max: +r.yellow_max };
 
   // pull data
-  const [agents, statsRange, slaRange, lateShifts, breakLogs] = await Promise.all([
+  const [agents, statsRange, slaRange, lateShifts, breakLogs, missedShifts] = await Promise.all([
     D.getAgents(),
     D.getStatsRange(fromDate, toDate),
     D.getSlaRange(fromDate, toDate),
     monthKey ? D.getLateShifts(monthKey) : D.getLateShiftsRange(fromDate, toDate),
     D.getBreakLogRange(fromDate, toDate),
+    D.getMissedShiftsRange(fromDate, toDate),
   ]);
 
   const weeks = weeksOfRange(fromDate, toDate);
@@ -87,11 +88,12 @@ async function buildReports(fromDate, toDate, options, monthKey) {
 
   // index data by agent
   const byAgent = {};
-  for (const a of agents) byAgent[a.email] = { email: a.email, name: a.name || a.email, stats: [], sla: [], late: [], breaks: [] };
-  for (const s of statsRange) (byAgent[s.agent_email] = byAgent[s.agent_email] || { email:s.agent_email, name:s.agent_email, stats:[], sla:[], late:[], breaks:[] }).stats.push(s);
+  for (const a of agents) byAgent[a.email] = { email: a.email, name: a.name || a.email, stats: [], sla: [], late: [], breaks: [], missed: [] };
+  for (const s of statsRange) (byAgent[s.agent_email] = byAgent[s.agent_email] || { email:s.agent_email, name:s.agent_email, stats:[], sla:[], late:[], breaks:[], missed:[] }).stats.push(s);
   for (const s of slaRange)   (byAgent[s.agent_email] || {}).sla?.push(s);
   for (const l of lateShifts) (byAgent[l.agent_email] || {}).late?.push(l);
   for (const b of breakLogs)  (byAgent[b.agent_email] || {}).breaks?.push(b);
+  for (const x of missedShifts) (byAgent[x.agent_email] || {}).missed?.push(x);
 
   // compute team averages for comparison
   const teamAgg = { resolved:0, closed:0, avgRespSum:0, avgRespN:0, agents:0 };
@@ -149,6 +151,9 @@ async function buildReports(fromDate, toDate, options, monthKey) {
     if (flags.off_breaks==='red') concerns.push(`${offBreaks} off-schedule breaks`);
     if (flags.avg_response==='red') concerns.push(`${avgResp}m avg response`);
     if (flags.sla_breach_pct==='red') concerns.push(`${slaBreachPct}% response-SLA breach`);
+    // shown with the attendance (late shifts) section
+    const missedCount = a.missed.length;
+    if (missedCount && selected.includes('late_shifts')) concerns.push(`${missedCount} shift${missedCount===1?'':'s'} with no clock-in`);
 
     reports.push({
       email, name: a.name, monthKey, range,
@@ -157,10 +162,11 @@ async function buildReports(fromDate, toDate, options, monthKey) {
         resolved: totResolved, closed: totClosed,
         avgResponseMin: avgResp, firstReplyMin: firstReply,
         slaDue: totDue, slaBreached: totBreach, slaBreachPct,
-        lateShifts: lateDays, offBreaks,
+        lateShifts: lateDays, offBreaks, missedShifts: missedCount,
         custom: customTotals,
       },
       lateDetail: a.late.map(l=>({date:l.log_date, lateMin:l.late_min})),
+      missedDetail: a.missed.map(x=>({ start:x.scheduled_start, end:x.scheduled_end })),
       breakDetail: a.breaks.map(b=>({date:b.log_date, lateMin:b.late_min})),
       flags, concerns, selected,
     });
@@ -205,6 +211,12 @@ const dayLabel = (iso, weekday = false) => isoDate(iso).toLocaleDateString('en-U
   { timeZone:'UTC', month:'short', day:'numeric', ...(weekday ? { weekday:'short' } : {}) });
 const monthLabel = (monthKey) => isoDate(monthKey + '-01').toLocaleDateString('en-US',
   { timeZone:'UTC', month:'long', year:'numeric' });
+// Shift times are shown in DISPLAY_TZ, like the rest of the dashboard.
+const REPORT_TZ = process.env.DISPLAY_TZ || 'America/Los_Angeles';
+const shiftDayLabel = (iso) => new Date(iso).toLocaleDateString('en-US', { timeZone:REPORT_TZ, weekday:'short', month:'short', day:'numeric' });
+const shiftTime = (iso) => iso ? new Date(iso).toLocaleTimeString('en-US', { timeZone:REPORT_TZ, hour:'2-digit', minute:'2-digit', hour12:false }) : '?';
+const tzAbbr = () => new Date().toLocaleTimeString('en-US', { timeZone:REPORT_TZ, timeZoneName:'short' }).split(' ').pop();
+
 // "Sep 15 – Oct 14, 2026" (years shown on both ends only when they differ)
 function rangeLabel(from, to) {
   const opt = (withYear) => ({ timeZone:'UTC', month:'short', day:'numeric', ...(withYear ? { year:'numeric' } : {}) });
@@ -268,6 +280,7 @@ function generatePDF(report) {
     if (inc('off_breaks')   && f.off_breaks === 'red')     concerns.push(['Off-schedule breaks', `${t.offBreaks} breaks taken outside the schedule`]);
     if (inc('avg_response') && f.avg_response === 'red')   concerns.push(['Average response time', `${fmtMin(t.avgResponseMin)} on average`]);
     if (inc('sla')          && f.sla_breach_pct === 'red') concerns.push(['Response-SLA breach', `${t.slaBreachPct}% of due responses missed (${t.slaBreached} of ${t.slaDue})`]);
+    if (inc('late_shifts')  && t.missedShifts) concerns.push(['No clock-in', `${t.missedShifts} rostered shift${t.missedShifts === 1 ? '' : 's'} with no clock-in and no leave`]);
     {
       const tone = concerns.length ? 'red' : 'green';
       const h = concerns.length ? 34 + concerns.length * 16 : 36;
@@ -300,6 +313,9 @@ function generatePDF(report) {
       sub: `${t.lateShifts === 1 ? 'day' : 'days'} this ${unit}`, flag:f.late_shifts });
     if (inc('off_breaks'))   cards.push({ label:'Off-schedule breaks', value:String(t.offBreaks ?? 0),
       sub:`this ${unit}`, flag:f.off_breaks });
+    // reports generated before this metric existed have no missedShifts field
+    if (inc('late_shifts') && t.missedShifts !== undefined) cards.push({ label:'No clock-in', value:String(t.missedShifts),
+      sub:'rostered shifts, no leave', flag: t.missedShifts ? 'red' : 'green' });
 
     if (cards.length) {
       sectionTitle(`${Unit} at a glance`);
@@ -408,6 +424,13 @@ function generatePDF(report) {
       const totalLate = mins.reduce((s, v) => s + v, 0);
       sectionTitle('Late shift detail', `${late.length} days · ${fmtMin(totalLate)} total · longest ${fmtMin(Math.max(...mins))}`);
       drawDayGrid(late.map(l => ({ day:dayLabel(l.date, true), value:fmtMin(l.lateMin) })), FLAG_COLOR.red, 4);
+    }
+
+    // ── No clock-in detail ──
+    const missed = report.missedDetail || [];
+    if (inc('late_shifts') && missed.length) {
+      sectionTitle('Shifts with no clock-in', `Rostered, no Deputy timesheet, no leave · times ${tzAbbr()}`);
+      drawDayGrid(missed.map(x => ({ day:shiftDayLabel(x.start), value:`${shiftTime(x.start)}–${shiftTime(x.end)}` })), FLAG_COLOR.red, 3);
     }
 
     // ── Off-schedule break detail ──
@@ -539,6 +562,7 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       if (inc('off_breaks')   && f.off_breaks === 'red')     items.push(`${t.offBreaks} off-schedule breaks`);
       if (inc('avg_response') && f.avg_response === 'red')   items.push(`${fmtMin(t.avgResponseMin)} avg response`);
       if (inc('sla')          && f.sla_breach_pct === 'red') items.push(`${t.slaBreachPct}% SLA breach`);
+      if (inc('late_shifts')  && t.missedShifts) items.push(`${t.missedShifts} shift${t.missedShifts === 1 ? '' : 's'} with no clock-in`);
       if (items.length) attention.push([r.name || r.email, items.join(', ')]);
     }
     {
@@ -570,6 +594,11 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
     if (inc('sla'))          cards.push({ label:'Response-SLA breach', value:`${team.slaBreachPct}%`, sub:`${team.slaBreached} of ${team.slaDue} due`, flag:teamFlags.sla_breach_pct });
     if (inc('late_shifts'))  cards.push({ label:'Late shifts', value:String(team.lateShifts), sub:`${countFlag('late_shifts', 'red')} agents flagged red` });
     if (inc('off_breaks'))   cards.push({ label:'Off-schedule breaks', value:String(team.offBreaks), sub:`${countFlag('off_breaks', 'red')} agents flagged red` });
+    const hasMissed = agents.some(r => r.totals?.missedShifts !== undefined);
+    if (inc('late_shifts') && hasMissed) {
+      const n = sumT('missedShifts'), who = agents.filter(r => r.totals?.missedShifts).length;
+      cards.push({ label:'No clock-in', value:String(n), sub:`${who} agent${who === 1 ? '' : 's'} · rostered, no leave`, flag: n ? 'red' : 'green' });
+    }
     if (cards.length) {
       sectionTitle('Team at a glance');
       const perRow = 4, gap = 10, cw = (W - gap*(perRow-1)) / perRow, ch = 64;
@@ -653,11 +682,13 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
         .map(({ r, mins, total }) => [
           r.name || r.email,
           ...(inc('late_shifts') ? [flagged(String(r.totals?.lateShifts ?? 0), r.flags?.late_shifts), fmtMin(total), fmtMin(mins.length ? Math.max(...mins) : 0)] : []),
+          ...(inc('late_shifts') && hasMissed ? [flagged(String(r.totals?.missedShifts ?? 0), r.totals?.missedShifts ? 'red' : null)] : []),
           ...(inc('off_breaks') ? [flagged(String(r.totals?.offBreaks ?? 0), r.flags?.off_breaks)] : []),
         ]);
       const cols = [
-        ...(inc('late_shifts') ? [{ label:'Late days', width:70, align:'right' }, { label:'Total late', width:80, align:'right' }, { label:'Longest', width:70, align:'right' }] : []),
-        ...(inc('off_breaks') ? [{ label:'Off-schedule breaks', width:120, align:'right' }] : []),
+        ...(inc('late_shifts') ? [{ label:'Late days', width:66, align:'right' }, { label:'Total late', width:70, align:'right' }, { label:'Longest', width:62, align:'right' }] : []),
+        ...(inc('late_shifts') && hasMissed ? [{ label:'No clock-in', width:74, align:'right' }] : []),
+        ...(inc('off_breaks') ? [{ label:'Off-sched. breaks', width:100, align:'right' }] : []),
       ];
       sectionTitle('Attendance', 'Sorted by late days', (rows.length + 1) * ROW_H);
       drawTable([{ label:'Agent', width:W - cols.reduce((s, c) => s + c.width, 0) }, ...cols], rows);

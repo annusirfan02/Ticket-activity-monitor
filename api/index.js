@@ -7,6 +7,7 @@ const path    = require('path');
 const crypto  = require('crypto');
 const D        = require('./db');
 const R        = require('./report');
+const A        = require('./attendance');
 
 const app = express();
 app.use(express.json());
@@ -295,23 +296,43 @@ async function depLiveBreaks() {
   } catch (e) { console.warn('[Deputy] live break:', e.message); return {}; }
 }
 
-// Clock-in times from Deputy timesheets (yesterday + today, so shifts that start
-// near UTC midnight are covered). Returns: Deputy employee Id -> [clock-in ms].
-// Returns null when Deputy can't be reached, so late detection is skipped rather
-// than guessed.
-async function depClockIns() {
-  const day = (offset) => new Date(Date.now() + offset*86400000).toISOString().split('T')[0];
+const depDay = (offset) => new Date(Date.now() + offset*86400000).toISOString().split('T')[0];
+
+// Timesheets from Deputy (2 days back to today, so shifts near UTC midnight and
+// recently ended shifts are covered). Returns: Deputy employee Id -> [{ start, end }]
+// (ms; end = now while in progress). Returns null when Deputy can't be reached,
+// so late/missed detection is skipped rather than guessed.
+async function depTimesheets() {
   try {
     const { data } = await axios.post(`${depBase()}/resource/Timesheet/QUERY`,
-      { search: { s1:{field:'Date',type:'ge',data:day(-1)}, s2:{field:'Date',type:'le',data:day(0)} }, max:500 },
+      { search: { s1:{field:'Date',type:'ge',data:depDay(-2)}, s2:{field:'Date',type:'le',data:depDay(0)} }, max:500 },
       { headers: depHeaders() });
     const map = {};
     for (const t of (data || [])) {
       if (!t.Employee || !t.StartTime) continue;
-      (map[t.Employee] = map[t.Employee] || []).push(t.StartTime*1000);
+      (map[t.Employee] = map[t.Employee] || []).push(A.toTimesheet(t));
     }
     return map;
-  } catch (e) { console.warn('[Deputy] clock-ins:', e.message); return null; }
+  } catch (e) { console.warn('[Deputy] timesheets:', e.message); return null; }
+}
+
+// Published rosters and leave for the last 2 days, for no-clock-in detection.
+// Returns { shifts: Id -> [shift], leave: Id -> [leave] } or null on failure.
+async function depRecentRostersAndLeave() {
+  try {
+    const [rRes, lRes] = await Promise.all([
+      axios.post(`${depBase()}/resource/Roster/QUERY`,
+        { search: { s1:{field:'Date',type:'ge',data:depDay(-2)}, s2:{field:'Date',type:'le',data:depDay(0)}, s3:{field:'Published',type:'eq',data:true} }, max:500 },
+        { headers: depHeaders() }),
+      axios.post(`${depBase()}/resource/Leave/QUERY`,
+        { search: { s1:{field:'DateEnd',type:'ge',data:depDay(-3)}, s2:{field:'DateStart',type:'le',data:depDay(1)} }, max:500 },
+        { headers: depHeaders() }),
+    ]);
+    const shifts = {}, leave = {};
+    for (const r of (rRes.data || [])) if (r.Employee && r.StartTime) (shifts[r.Employee] = shifts[r.Employee] || []).push(A.toShift(r));
+    for (const l of (lRes.data || [])) if (l.Employee && l.Start) (leave[l.Employee] = leave[l.Employee] || []).push(A.toLeave(l));
+    return { shifts, leave };
+  } catch (e) { console.warn('[Deputy] rosters/leave:', e.message); return null; }
 }
 
 // ── MONITOR STATE (pauses only on live break) ──
@@ -392,8 +413,9 @@ async function runPoll() {
   ]);
   if (!activeEmails.length) { mem.lastChecked = new Date().toISOString(); return { agents: [] }; }
 
-  const [fdAgentList, schedule, liveBreaks, empIdMap, statusChoices, normalTimes, clockIns] = await Promise.all([
-    fdAgents(), getSchedule(activeEmails), depLiveBreaks(), depEmpIdByEmail(activeEmails), fdTicketFields(), getNormalShiftTimes(activeEmails), depClockIns(),
+  const [fdAgentList, schedule, liveBreaks, empIdMap, statusChoices, normalTimes, timesheets, recentRoster] = await Promise.all([
+    fdAgents(), getSchedule(activeEmails), depLiveBreaks(), depEmpIdByEmail(activeEmails), fdTicketFields(), getNormalShiftTimes(activeEmails),
+    depTimesheets(), depRecentRostersAndLeave(),
   ]);
 
   const agents = fdAgentList.filter(a => activeEmails.includes((a.contact?.email||'').toLowerCase().trim()));
@@ -654,9 +676,9 @@ async function runPoll() {
     // by the customer or automation), so it says nothing about when the agent began.
     // Only the earliest clock-in near this shift counts; nothing is logged until the
     // agent clocks in, and an on-time clock-in clears any row logged earlier today.
-    if (ms.shift && clockIns && depId) {
+    if (ms.shift && timesheets && depId) {
       const graceMs = (parseInt(process.env.LATE_GRACE_MINUTES||5))*60000;
-      const clockIn = (clockIns[depId] || [])
+      const clockIn = (timesheets[depId] || []).map(t => t.start)
         .filter(ts => ts >= ms.shift.startTs - 3*3600000 && ts <= ms.shift.endTs)
         .sort((a, b) => a - b)[0];
       if (clockIn) {
@@ -672,6 +694,29 @@ async function runPoll() {
             await D.deleteLateShift(email, today);
           }
         } catch (e) { console.error('lateShift:', e.message); }
+      }
+    }
+
+    // ── NO CLOCK-IN: rostered shifts that ended in the last 36h with no timesheet
+    // and no leave (rule in api/attendance.js). Re-checked each poll, so a shift
+    // later covered by leave or a late-entered timesheet is removed again.
+    if (recentRoster && timesheets && depId) {
+      const recent = (recentRoster.shifts[depId] || []).filter(s => s.end <= now && s.end > now - 36*3600000);
+      const missed = new Set(A.findMissedShifts({
+        shifts: recent, timesheets: timesheets[depId] || [], leave: recentRoster.leave[depId] || [], now,
+      }));
+      for (const s of recent) {
+        const startIso = new Date(s.start).toISOString(), day = A.shiftDate(s.start);
+        try {
+          if (missed.has(s)) {
+            await D.upsertMissedShift({
+              agent_email: email, agent_name: name, log_date: day, month_key: day.slice(0,7),
+              scheduled_start: startIso, scheduled_end: new Date(s.end).toISOString(),
+            });
+          } else {
+            await D.deleteMissedShift(email, startIso);
+          }
+        } catch (e) { if (!/schema cache/.test(e.message)) console.error('missedShift:', e.message); }
       }
     }
 

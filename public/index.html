@@ -377,8 +377,8 @@ tr:hover td{background:rgba(255,255,255,.015)}
         </div>
 
         <div class="tbl-scroll"><table>
-          <thead><tr><th>Agent</th><th>Concerns</th><th>Resolved</th><th>SLA Breach</th><th>Late</th><th>Off-Breaks</th><th>PDF</th></tr></thead>
-          <tbody id="reportsBody"><tr><td colspan="7" class="empty">Pick a month and Generate, then Load</td></tr></tbody>
+          <thead><tr><th>Agent</th><th>Concerns</th><th>Resolved</th><th>SLA Breach</th><th>Late</th><th>No Clock-in</th><th>Off-Breaks</th><th>PDF</th></tr></thead>
+          <tbody id="reportsBody"><tr><td colspan="8" class="empty">Pick a month and Generate, then Load</td></tr></tbody>
         </table></div>
       </div>
 
@@ -812,19 +812,19 @@ async function generateReports(){
 }
 async function loadReports(){
   const month=repMonthVal(); const tb=document.getElementById('reportsBody');
-  tb.innerHTML='<tr><td colspan="7" class="empty">Loading…</td></tr>';
+  tb.innerHTML='<tr><td colspan="8" class="empty">Loading…</td></tr>';
   try{
     const r=await authFetch('/api/reports?month='+month); const d=await r.json(); if(!d.ok)throw new Error(d.error);
-    if(!d.reports.length){tb.innerHTML='<tr><td colspan="7" class="empty">No reports for '+month+' — click Generate</td></tr>';return;}
+    if(!d.reports.length){tb.innerHTML='<tr><td colspan="8" class="empty">No reports for '+month+' — click Generate</td></tr>';return;}
     renderReportRows(d.reports, 'month='+month, month);
-  }catch(e){ tb.innerHTML=`<tr><td colspan="7" class="empty">Error: ${esc(e.message)}</td></tr>`; }
+  }catch(e){ tb.innerHTML=`<tr><td colspan="8" class="empty">Error: ${esc(e.message)}</td></tr>`; }
 }
 function repIsRange(){ return document.getElementById('repMode').value==='range'; }
 function repModeChanged(){
   const range=repIsRange();
   document.querySelectorAll('.rep-range').forEach(el=>el.classList.toggle('hidden',!range));
   document.querySelectorAll('.rep-month').forEach(el=>el.classList.toggle('hidden',range));
-  if(range) document.getElementById('reportsBody').innerHTML='<tr><td colspan="7" class="empty">Pick a date range and click Load</td></tr>';
+  if(range) document.getElementById('reportsBody').innerHTML='<tr><td colspan="8" class="empty">Pick a date range and click Load</td></tr>';
   else loadReports();
 }
 // Custom range: query string for the range endpoints, or null (with a toast) if invalid
@@ -837,12 +837,12 @@ function rangeQuery(){
 async function loadRangeReports(){
   const rq=rangeQuery(); if(!rq) return;
   const tb=document.getElementById('reportsBody');
-  tb.innerHTML='<tr><td colspan="7" class="empty">Calculating…</td></tr>';
+  tb.innerHTML='<tr><td colspan="8" class="empty">Calculating…</td></tr>';
   try{
     const r=await authFetch('/api/reports/range?'+rq.qs); const d=await r.json(); if(!d.ok)throw new Error(d.error);
-    if(!d.reports.length){tb.innerHTML='<tr><td colspan="7" class="empty">No agents found</td></tr>';return;}
+    if(!d.reports.length){tb.innerHTML='<tr><td colspan="8" class="empty">No agents found</td></tr>';return;}
     renderReportRows(d.reports, rq.qs, rq.label);
-  }catch(e){ tb.innerHTML=`<tr><td colspan="7" class="empty">Error: ${esc(e.message)}</td></tr>`; }
+  }catch(e){ tb.innerHTML=`<tr><td colspan="8" class="empty">Error: ${esc(e.message)}</td></tr>`; }
 }
 // qs = query string the row's PDF link uses (month=… or from=…&to=…), label = filename suffix
 function renderReportRows(reports, qs, label){
@@ -857,6 +857,7 @@ function renderReportRows(reports, qs, label){
       <td><span class="num g">${t.resolved??0}</span></td>
       <td>${dot(f.sla_breach_pct)}<span class="num">${t.slaBreachPct??0}%</span></td>
       <td>${dot(f.late_shifts)}<span class="num">${t.lateShifts??0}</span></td>
+      <td>${t.missedShifts==null?'<span class="empty-cell">–</span>':dot(t.missedShifts?'red':'green')+'<span class="num">'+t.missedShifts+'</span>'}</td>
       <td>${dot(f.off_breaks)}<span class="num">${t.offBreaks??0}</span></td>
       <td><a class="tkt-link" href="/api/reports/pdf?${qs}&agent=${encodeURIComponent(rep.email)}" data-filename="${esc(rep.email.split('@')[0])}-${label}.pdf" onclick="return dlPdf(event,this)">⬇ PDF</a></td>
     </tr>`;

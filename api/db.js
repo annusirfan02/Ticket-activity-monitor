@@ -296,6 +296,24 @@ async function getSlaRange(fromDate, toDate, agentEmail = null) {
   return data || [];
 }
 
+// ── MISSED SHIFTS (rostered, no clock-in, no leave) ──
+async function upsertMissedShift(row) {
+  const { error } = await db().from('missed_shifts').upsert(row, { onConflict: 'agent_email,scheduled_start' });
+  if (error) throw new Error('upsertMissedShift: ' + error.message);
+}
+// Drop rows for shifts that turned out to be worked or covered by leave.
+async function deleteMissedShift(agentEmail, scheduledStartIso) {
+  const { error } = await db().from('missed_shifts').delete().eq('agent_email', agentEmail).eq('scheduled_start', scheduledStartIso);
+  if (error) throw new Error('deleteMissedShift: ' + error.message);
+}
+async function getMissedShiftsRange(fromDate, toDate) {
+  const { data, error } = await db().from('missed_shifts').select('*')
+    .gte('log_date', fromDate).lte('log_date', toDate).order('scheduled_start', { ascending: true });
+  // reports still work before the table is created
+  if (error) { if (/schema cache|does not exist/.test(error.message)) return []; throw new Error('getMissedShiftsRange: ' + error.message); }
+  return data || [];
+}
+
 // ── GROUP DAILY STATS (per agent × ticket group × day) ──
 // Replaces an agent's rows for one stat_date: upserts the groups present now and
 // drops groups that no longer have tickets (e.g. a ticket moved to another group).
@@ -364,6 +382,7 @@ module.exports = {
   upsertIdleLog, getIdleLog, getIdleRange,
   upsertSlaDaily, getSlaRange,
   replaceGroupStats, getGroupStatsRange,
+  upsertMissedShift, deleteMissedShift, getMissedShiftsRange,
   getThresholds, setThreshold,
   saveReport, getReports, getReportMonths,
 };

@@ -237,17 +237,14 @@ async function getArchives() {
 
 // ── LATE SHIFTS ──
 async function logLateShift(row) {
-  // one row per agent per day; keep the worst (max late_min) if multiple
-  const { data: ex } = await db().from('late_shifts').select('id,late_min').eq('agent_email', row.agent_email).eq('log_date', row.log_date);
-  if (ex && ex.length) {
-    if ((row.late_min||0) > (ex[0].late_min||0)) {
-      const { error } = await db().from('late_shifts').update(row).eq('id', ex[0].id);
-      if (error) throw new Error('logLateShift upd: ' + error.message);
-    }
-    return;
-  }
-  const { error } = await db().from('late_shifts').insert(row);
+  // one row per agent per day, holding the current clock-in result (the clock-in
+  // doesn't change, so the latest value is the right one)
+  const { error } = await db().from('late_shifts').upsert(row, { onConflict: 'agent_email,log_date' });
   if (error) throw new Error('logLateShift: ' + error.message);
+}
+async function deleteLateShift(agentEmail, logDate) {
+  const { error } = await db().from('late_shifts').delete().eq('agent_email', agentEmail).eq('log_date', logDate);
+  if (error) throw new Error('deleteLateShift: ' + error.message);
 }
 async function getLateShifts(monthKey, agentEmail = null) {
   let q = db().from('late_shifts').select('*').eq('month_key', monthKey).order('log_date', { ascending: true });
@@ -363,7 +360,7 @@ module.exports = {
   getStatsByDate, getStatsRange,
   upsertOverdue, markReplied, deleteOverdue, mark48hNotified, getOverdue, getUnnotified48h,
   archiveMonth, getArchives,
-  logLateShift, getLateShifts, getLateShiftsRange,
+  logLateShift, deleteLateShift, getLateShifts, getLateShiftsRange,
   upsertIdleLog, getIdleLog, getIdleRange,
   upsertSlaDaily, getSlaRange,
   replaceGroupStats, getGroupStatsRange,

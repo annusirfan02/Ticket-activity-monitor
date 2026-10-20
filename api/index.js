@@ -295,6 +295,25 @@ async function depLiveBreaks() {
   } catch (e) { console.warn('[Deputy] live break:', e.message); return {}; }
 }
 
+// Clock-in times from Deputy timesheets (yesterday + today, so shifts that start
+// near UTC midnight are covered). Returns: Deputy employee Id -> [clock-in ms].
+// Returns null when Deputy can't be reached, so late detection is skipped rather
+// than guessed.
+async function depClockIns() {
+  const day = (offset) => new Date(Date.now() + offset*86400000).toISOString().split('T')[0];
+  try {
+    const { data } = await axios.post(`${depBase()}/resource/Timesheet/QUERY`,
+      { search: { s1:{field:'Date',type:'ge',data:day(-1)}, s2:{field:'Date',type:'le',data:day(0)} }, max:500 },
+      { headers: depHeaders() });
+    const map = {};
+    for (const t of (data || [])) {
+      if (!t.Employee || !t.StartTime) continue;
+      (map[t.Employee] = map[t.Employee] || []).push(t.StartTime*1000);
+    }
+    return map;
+  } catch (e) { console.warn('[Deputy] clock-ins:', e.message); return null; }
+}
+
 // ── MONITOR STATE (pauses only on live break) ──
 function monitorState(email, schedule, liveBreakStart) {
   const now = Date.now();
@@ -373,8 +392,8 @@ async function runPoll() {
   ]);
   if (!activeEmails.length) { mem.lastChecked = new Date().toISOString(); return { agents: [] }; }
 
-  const [fdAgentList, schedule, liveBreaks, empIdMap, statusChoices, normalTimes] = await Promise.all([
-    fdAgents(), getSchedule(activeEmails), depLiveBreaks(), depEmpIdByEmail(activeEmails), fdTicketFields(), getNormalShiftTimes(activeEmails),
+  const [fdAgentList, schedule, liveBreaks, empIdMap, statusChoices, normalTimes, clockIns] = await Promise.all([
+    fdAgents(), getSchedule(activeEmails), depLiveBreaks(), depEmpIdByEmail(activeEmails), fdTicketFields(), getNormalShiftTimes(activeEmails), depClockIns(),
   ]);
 
   const agents = fdAgentList.filter(a => activeEmails.includes((a.contact?.email||'').toLowerCase().trim()));
@@ -421,20 +440,6 @@ async function runPoll() {
     mem.shiftWindowStart[email] = ws;
   }
 
-  // Map each agent -> today's shift start (for late-shift detection)
-  const todayShiftStart = {};
-  for (const a of agents) {
-    const email = id2email[a.id];
-    const sEntry = schedule[email];
-    if (sEntry && sEntry.shifts && sEntry.shifts.length) {
-      const todayShifts = sEntry.shifts.filter(s => {
-        const d = new Date(s.startTs).toISOString().split('T')[0];
-        return d === new Date().toISOString().split('T')[0];
-      });
-      if (todayShifts.length) todayShiftStart[email] = Math.min(...todayShifts.map(s=>s.startTs));
-    }
-  }
-
   // Existing overdue rows (one query) so the per-ticket loop only touches the DB
   // when something actually changes — not once per ticket.
   let existingOverdue = new Set();
@@ -466,8 +471,6 @@ async function runPoll() {
     const upd = new Date(t.updated_at).getTime();
     const cre = new Date(t.created_at).getTime();
     if (upd > m.lastSeen) m.lastSeen = upd;
-    const sStart = todayShiftStart[email];
-    if (sStart && upd >= sStart) { if (!m.firstActivityInShift || upd < m.firstActivityInShift) m.firstActivityInShift = upd; }
     if (cre >= winStart) { m.newTickets++; g.newTickets++; }
 
     const label = (statusChoices?.[t.status] || '').toString().toLowerCase();
@@ -646,23 +649,28 @@ async function runPoll() {
     } catch (e) { console.error('group stats:', e.message); }
 
     // ── LATE SHIFT detection ──
-    // If agent has a shift today and their first activity (lastSeen window) began
-    // after shift start + grace, log a late shift for today.
-    if (ms.shift) {
+    // Late = Deputy clock-in (timesheet start) after rostered shift start + grace.
+    // Ticket activity is NOT used: a ticket's updated_at is its latest change (often
+    // by the customer or automation), so it says nothing about when the agent began.
+    // Only the earliest clock-in near this shift counts; nothing is logged until the
+    // agent clocks in, and an on-time clock-in clears any row logged earlier today.
+    if (ms.shift && clockIns && depId) {
       const graceMs = (parseInt(process.env.LATE_GRACE_MINUTES||5))*60000;
-      // earliest activity we can see this shift = the agent's lastSeen if within shift,
-      // but better: use first ticket activity at/after shift start. We approximate with
-      // the earliest ticket update for this agent at/after shift start.
-      const firstActivity = m.firstActivityInShift || null;
-      if (firstActivity && firstActivity > ms.shift.startTs + graceMs) {
-        const lateMin = Math.round((firstActivity - ms.shift.startTs)/60000);
+      const clockIn = (clockIns[depId] || [])
+        .filter(ts => ts >= ms.shift.startTs - 3*3600000 && ts <= ms.shift.endTs)
+        .sort((a, b) => a - b)[0];
+      if (clockIn) {
         try {
-          await D.logLateShift({
-            agent_email: email, agent_name: name, log_date: today, month_key: today.slice(0,7),
-            scheduled_start: new Date(ms.shift.startTs).toISOString(),
-            actual_start: new Date(firstActivity).toISOString(),
-            late_min: lateMin,
-          });
+          if (clockIn > ms.shift.startTs + graceMs) {
+            await D.logLateShift({
+              agent_email: email, agent_name: name, log_date: today, month_key: today.slice(0,7),
+              scheduled_start: new Date(ms.shift.startTs).toISOString(),
+              actual_start: new Date(clockIn).toISOString(),
+              late_min: Math.round((clockIn - ms.shift.startTs)/60000),
+            });
+          } else {
+            await D.deleteLateShift(email, today);
+          }
         } catch (e) { console.error('lateShift:', e.message); }
       }
     }

@@ -37,6 +37,15 @@ const OVERDUE_MS = (parseInt(process.env.OVERDUE_AFTER_HOURS || 24)) * 3600000;
 const WINDOWED_STATUS_RX = /a2p approval/i;
 // Resolved/Closed already have their own columns — never show them as custom pills.
 const CORE_STATUS_IDS = new Set([4, 5]);
+// Tickets whose status label or a tag matches are ignored entirely: stats, SLA,
+// activity and the overdue log.
+const EXCLUDED_STATUS_RX = /archive/i;
+// Matched case-insensitively on tickets; Freshdesk tag *search* is case-sensitive,
+// so the cleanup sweep searches the listed spelling and its lowercase form.
+const EXCLUDED_TAGS = ['Archive'];
+const agentLabel = (choice) => Array.isArray(choice) ? String(choice[0]) : String(choice || '');
+const hasExcludedTag = (t) => (t.tags || []).some(tag =>
+  EXCLUDED_TAGS.some(x => x.toLowerCase() === String(tag).toLowerCase().trim()));
 
 // ── FRESHDESK ──
 const fdHeaders = () => ({
@@ -84,6 +93,22 @@ async function fdCountByStatus(agentId, statusId) {
     mem.currentCounts[key] = { count, at: Date.now() };
     return count;
   } catch (e) { console.warn('[FD] count', key, e.message); return c ? c.count : 0; }
+}
+
+// IDs of tickets currently in any of the given statuses or carrying any of the
+// given tags (search API caps at 10 pages of 30).
+async function fdTicketIdsExcluded(statusIds, tags) {
+  const tagVariants = [...new Set(tags.flatMap(tag => [tag, tag.toLowerCase()]))];
+  const clauses = [...[...statusIds].map(id => `status:${id}`), ...tagVariants.map(tag => `tag:'${tag}'`)];
+  const q = encodeURIComponent(`"${clauses.join(' OR ')}"`);
+  const ids = [];
+  for (let page = 1; page <= 10; page++) {
+    const { data } = await axios.get(`${fdBase()}/search/tickets?query=${q}&page=${page}`, { headers: fdHeaders() });
+    const rs = data?.results || [];
+    ids.push(...rs.map(r => r.id));
+    if (rs.length < 30) break;
+  }
+  return ids;
 }
 
 // ── DEPUTY ──
@@ -343,6 +368,8 @@ async function runPoll() {
   const email2name = {}; allAgents.forEach(a => email2name[a.email] = a.name);
 
   const tickets = await fdTicketsSince(new Date(now - 24*3600000).toISOString());
+  const excludedIds = new Set(Object.keys(statusChoices || {})
+    .filter(k => EXCLUDED_STATUS_RX.test(agentLabel(statusChoices[k]))).map(Number));
 
   const statusAgentMap = {};
   for (const s of trackedStatuses) statusAgentMap[s.label.toLowerCase()] = new Set((s.agents||[]).map(e=>e.toLowerCase()));
@@ -393,7 +420,20 @@ async function runPoll() {
   catch (e) { console.error('getOverdue:', e.message); }
   const overdueOps = { upsert: [], replied: [], del: [] };
 
+  // Overdue rows for tickets excluded (status/tag) more than 24h ago won't show
+  // up in the poll below, so sweep them out periodically via search.
+  if (existingOverdue.size && now - (mem.excludedPurgeAt || 0) > SCHED_TTL) {
+    try {
+      for (const id of await fdTicketIdsExcluded(excludedIds, EXCLUDED_TAGS)) if (existingOverdue.has(id)) overdueOps.del.push(id);
+      mem.excludedPurgeAt = now;
+    } catch (e) { console.warn('[FD] excluded purge:', e.message); }
+  }
+
   for (const t of tickets) {
+    if (excludedIds.has(t.status) || hasExcludedTag(t)) {
+      if (existingOverdue.has(t.id)) overdueOps.del.push(t.id);
+      continue;
+    }
     const respId = t.responder_id;
     if (!monitoredIds.includes(respId)) continue;
     const email = id2email[respId]; if (!email) continue;
@@ -472,7 +512,7 @@ async function runPoll() {
   await Promise.all([
     ...overdueOps.upsert.map(r => D.upsertOverdue(r).catch(e=>console.error('upsertOverdue:',e.message))),
     ...overdueOps.replied.map(([id,ts]) => D.markReplied(id,ts).catch(e=>console.error('markReplied:',e.message))),
-    ...overdueOps.del.map(id => D.deleteOverdue(id).catch(e=>console.error('deleteOverdue:',e.message))),
+    ...[...new Set(overdueOps.del)].map(id => D.deleteOverdue(id).catch(e=>console.error('deleteOverdue:',e.message))),
   ]);
 
   // ── Custom statuses: non-windowed ones show the agent's CURRENT total ──

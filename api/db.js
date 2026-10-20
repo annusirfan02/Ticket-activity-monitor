@@ -256,6 +256,13 @@ async function getLateShifts(monthKey, agentEmail = null) {
   if (error) throw new Error('getLateShifts: ' + error.message);
   return data || [];
 }
+async function getLateShiftsRange(fromDate, toDate, agentEmail = null) {
+  let q = db().from('late_shifts').select('*').gte('log_date', fromDate).lte('log_date', toDate).order('log_date', { ascending: true });
+  if (agentEmail) q = q.eq('agent_email', agentEmail.toLowerCase().trim());
+  const { data, error } = await q;
+  if (error) throw new Error('getLateShiftsRange: ' + error.message);
+  return data || [];
+}
 
 // ── IDLE LOG (inactive periods during shift) ──
 // Upsert keyed on (agent_email, idle_start): the same episode extends its
@@ -290,6 +297,32 @@ async function getSlaRange(fromDate, toDate, agentEmail = null) {
   const { data, error } = await q;
   if (error) throw new Error('getSlaRange: ' + error.message);
   return data || [];
+}
+
+// ── GROUP DAILY STATS (per agent × ticket group × day) ──
+// Replaces an agent's rows for one stat_date: upserts the groups present now and
+// drops groups that no longer have tickets (e.g. a ticket moved to another group).
+async function replaceGroupStats(agentEmail, statDate, rows) {
+  if (rows.length) {
+    const { error } = await db().from('group_daily_stats').upsert(rows, { onConflict: 'agent_email,group_id,stat_date' });
+    if (error) throw new Error('replaceGroupStats upsert: ' + error.message);
+  }
+  let q = db().from('group_daily_stats').delete().eq('agent_email', agentEmail).eq('stat_date', statDate);
+  if (rows.length) q = q.not('group_id', 'in', `(${rows.map(r => r.group_id).join(',')})`);
+  const { error } = await q;
+  if (error) throw new Error('replaceGroupStats delete: ' + error.message);
+}
+async function getGroupStatsRange(fromDate, toDate) {
+  // page through: PostgREST caps a single response at 1000 rows
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await db().from('group_daily_stats').select('*')
+      .gte('stat_date', fromDate).lte('stat_date', toDate).order('id').range(from, from + 999);
+    if (error) throw new Error('getGroupStatsRange: ' + error.message);
+    all.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return all;
 }
 
 // ── THRESHOLDS ──
@@ -330,9 +363,10 @@ module.exports = {
   getStatsByDate, getStatsRange,
   upsertOverdue, markReplied, deleteOverdue, mark48hNotified, getOverdue, getUnnotified48h,
   archiveMonth, getArchives,
-  logLateShift, getLateShifts,
+  logLateShift, getLateShifts, getLateShiftsRange,
   upsertIdleLog, getIdleLog, getIdleRange,
   upsertSlaDaily, getSlaRange,
+  replaceGroupStats, getGroupStatsRange,
   getThresholds, setThreshold,
   saveReport, getReports, getReportMonths,
 };

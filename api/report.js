@@ -26,20 +26,26 @@ function monthBounds(monthKey) {
   return { fromDate: start.toISOString().split('T')[0], toDate: end.toISOString().split('T')[0], y, m };
 }
 
-// Split a month into ISO week buckets (Mon-Sun) covering all days
-function weeksOfMonth(monthKey) {
-  const { y, m } = monthBounds(monthKey);
-  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+// Split a date range (YYYY-MM-DD, inclusive) into week buckets (Mon-Sun),
+// clipped to the range at both ends.
+function weeksOfRange(fromDate, toDate) {
   const weeks = []; let cur = [];
-  for (let d = 1; d <= last; d++) {
-    const date = new Date(Date.UTC(y, m - 1, d));
+  const end = new Date(toDate + 'T00:00:00Z').getTime();
+  for (let ts = new Date(fromDate + 'T00:00:00Z').getTime(); ts <= end; ts += 86400000) {
+    const date = new Date(ts);
     cur.push(date.toISOString().split('T')[0]);
-    if (date.getUTCDay() === 0 || d === last) { // Sunday or month end
+    if (date.getUTCDay() === 0 || ts === end) { // Sunday or range end
       weeks.push({ label: `${cur[0]} → ${cur[cur.length-1]}`, days: [...cur] });
       cur = [];
     }
   }
   return weeks;
+}
+
+// Split a month into ISO week buckets (Mon-Sun) covering all days
+function weeksOfMonth(monthKey) {
+  const { fromDate, toDate } = monthBounds(monthKey);
+  return weeksOfRange(fromDate, toDate);
 }
 
 /**
@@ -48,6 +54,18 @@ function weeksOfMonth(monthKey) {
  */
 async function buildMonthlyReports(monthKey, options = {}) {
   const { fromDate, toDate } = monthBounds(monthKey);
+  return buildReports(fromDate, toDate, options, monthKey);
+}
+
+/**
+ * Same as buildMonthlyReports but for any inclusive date range (not stored).
+ * The payload carries `range: { from, to }` so the PDFs label the period.
+ */
+async function buildRangeReports(fromDate, toDate, options = {}) {
+  return buildReports(fromDate, toDate, options, null);
+}
+
+async function buildReports(fromDate, toDate, options, monthKey) {
   const selected = options.selected || ['resolved_closed','a2p','ghl','custom','avg_response','first_reply','sla','late_shifts','off_breaks'];
 
   // thresholds
@@ -60,11 +78,12 @@ async function buildMonthlyReports(monthKey, options = {}) {
     D.getAgents(),
     D.getStatsRange(fromDate, toDate),
     D.getSlaRange(fromDate, toDate),
-    D.getLateShifts(monthKey),
+    monthKey ? D.getLateShifts(monthKey) : D.getLateShiftsRange(fromDate, toDate),
     D.getBreakLogRange(fromDate, toDate),
   ]);
 
-  const weeks = weeksOfMonth(monthKey);
+  const weeks = weeksOfRange(fromDate, toDate);
+  const range = monthKey ? undefined : { from: fromDate, to: toDate };
 
   // index data by agent
   const byAgent = {};
@@ -132,7 +151,7 @@ async function buildMonthlyReports(monthKey, options = {}) {
     if (flags.sla_breach_pct==='red') concerns.push(`${slaBreachPct}% response-SLA breach`);
 
     reports.push({
-      email, name: a.name, monthKey,
+      email, name: a.name, monthKey, range,
       weekly,
       totals: {
         resolved: totResolved, closed: totClosed,
@@ -186,6 +205,14 @@ const dayLabel = (iso, weekday = false) => isoDate(iso).toLocaleDateString('en-U
   { timeZone:'UTC', month:'short', day:'numeric', ...(weekday ? { weekday:'short' } : {}) });
 const monthLabel = (monthKey) => isoDate(monthKey + '-01').toLocaleDateString('en-US',
   { timeZone:'UTC', month:'long', year:'numeric' });
+// "Sep 15 – Oct 14, 2026" (years shown on both ends only when they differ)
+function rangeLabel(from, to) {
+  const opt = (withYear) => ({ timeZone:'UTC', month:'short', day:'numeric', ...(withYear ? { year:'numeric' } : {}) });
+  const sameYear = from.slice(0, 4) === to.slice(0, 4);
+  return `${isoDate(from).toLocaleDateString('en-US', opt(!sameYear))} – ${isoDate(to).toLocaleDateString('en-US', opt(true))}`;
+}
+// Report period: the month for stored monthly reports, else the custom range.
+const periodLabel = (report, monthKey) => report?.range ? rangeLabel(report.range.from, report.range.to) : monthLabel(monthKey || report.monthKey);
 function weekLabel(label) {
   const [a, b] = String(label).match(/\d{4}-\d{2}-\d{2}/g) || [];
   if (!a) return String(label);
@@ -194,7 +221,9 @@ function weekLabel(label) {
 
 function generatePDF(report) {
   return new Promise((resolve, reject) => {
-    const month = monthLabel(report.monthKey);
+    const month = periodLabel(report);
+    const unit = report.range ? 'period' : 'month';   // wording for custom ranges
+    const Unit = unit[0].toUpperCase() + unit.slice(1);
     const doc = new PDFDocument({
       size:'A4', margin:40, bufferPages:true,
       info:{ Title:`Performance Report – ${report.name} – ${month}`, Author:'Activity Monitor' },
@@ -225,7 +254,7 @@ function generatePDF(report) {
     // ── Header band ──
     doc.rect(0, 0, PW, 104).fill(C.brand);
     doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.brandSub)
-       .text('MONTHLY PERFORMANCE REPORT', M, 30, { characterSpacing:1.5, lineBreak:false });
+       .text(report.range ? 'PERFORMANCE REPORT' : 'MONTHLY PERFORMANCE REPORT', M, 30, { characterSpacing:1.5, lineBreak:false });
     doc.font('Helvetica-Bold').fontSize(22).fillColor('#ffffff').text(month, M, 46, { lineBreak:false });
     doc.font('Helvetica').fontSize(8.5).fillColor(C.brandSub)
        .text(`Generated ${new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}`, M, 76, { lineBreak:false });
@@ -245,7 +274,7 @@ function generatePDF(report) {
       doc.roundedRect(M, y, W, h, 6).fill(FLAG_TINT[tone]);
       doc.rect(M, y, 4, h).fill(FLAG_COLOR[tone]);
       doc.font('Helvetica-Bold').fontSize(10.5).fillColor(FLAG_COLOR[tone])
-         .text(concerns.length ? 'Top concerns' : 'No red-flag concerns this month', M + 18, y + 12, { lineBreak:false });
+         .text(concerns.length ? 'Top concerns' : `No red-flag concerns this ${unit}`, M + 18, y + 12, { lineBreak:false });
       let cy = y + 32;
       for (const [label, detail] of concerns) {
         doc.circle(M + 22, cy + 4, 2.2).fill(FLAG_COLOR.red);
@@ -268,12 +297,12 @@ function generatePDF(report) {
     if (inc('sla'))          cards.push({ label:'Response-SLA breach', value:`${t.slaBreachPct ?? 0}%`,
       sub:`${t.slaBreached ?? 0} of ${t.slaDue ?? 0} due`, flag:f.sla_breach_pct });
     if (inc('late_shifts'))  cards.push({ label:'Late shifts', value:String(t.lateShifts ?? 0),
-      sub: t.lateShifts === 1 ? 'day this month' : 'days this month', flag:f.late_shifts });
+      sub: `${t.lateShifts === 1 ? 'day' : 'days'} this ${unit}`, flag:f.late_shifts });
     if (inc('off_breaks'))   cards.push({ label:'Off-schedule breaks', value:String(t.offBreaks ?? 0),
-      sub:'this month', flag:f.off_breaks });
+      sub:`this ${unit}`, flag:f.off_breaks });
 
     if (cards.length) {
-      sectionTitle('Month at a glance');
+      sectionTitle(`${Unit} at a glance`);
       const perRow = 4, gap = 10, cw = (W - gap*(perRow-1)) / perRow, ch = 64;
       cards.forEach((c, i) => {
         if (i % perRow === 0 && i) y += ch + gap;
@@ -335,7 +364,7 @@ function generatePDF(report) {
     // ── Custom statuses ──
     const custom = Object.entries(t.custom || {});
     if ((inc('custom') || inc('a2p') || inc('ghl')) && custom.length) {
-      sectionTitle('Ticket statuses', 'Total for the month', (custom.length + 1) * 22);
+      sectionTitle('Ticket statuses', `Total for the ${unit}`, (custom.length + 1) * 22);
       drawTable([{ label:'Status', width:W - 120 }, { label:'Tickets', width:120, align:'right' }],
         custom.sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, String(v)]));
     }
@@ -354,7 +383,7 @@ function generatePDF(report) {
       drawTable(cols,
         weekly.map(w => [weekLabel(w.label), String(w.newTickets), String(w.resolved), String(w.closed),
           fmtMin(w.avgResponseMin), fmtMin(w.firstReplyMin), w.slaDue ? `${w.slaBreachPct}%` : '–']),
-        { totalRow: ['Month total', String(totalNew), String(t.resolved ?? 0), String(t.closed ?? 0),
+        { totalRow: [`${Unit} total`, String(totalNew), String(t.resolved ?? 0), String(t.closed ?? 0),
           fmtMin(t.avgResponseMin), fmtMin(t.firstReplyMin),
           { text: t.slaDue ? `${t.slaBreachPct}%` : '–', color: f.sla_breach_pct ? FLAG_COLOR[f.sla_breach_pct] : undefined }] });
     }
@@ -406,4 +435,484 @@ function generatePDF(report) {
   });
 }
 
-module.exports = { buildMonthlyReports, generatePDF, weeksOfMonth, DEFAULT_THRESHOLDS };
+// ── TEAM PDF (all agents in one report) ──
+// Built from the stored per-agent payloads for the month; `thresholds` flags the
+// team-level averages the same way agent metrics are flagged.
+function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
+  return new Promise((resolve, reject) => {
+    const month = periodLabel(reports[0], monthKey);
+    const unit = reports[0]?.range ? 'period' : 'month';
+    const Unit = unit[0].toUpperCase() + unit.slice(1);
+    const doc = new PDFDocument({
+      size:'A4', margin:40, bufferPages:true,
+      info:{ Title:`Team Performance Report – ${month}`, Author:'Activity Monitor' },
+    });
+    const chunks = [];
+    doc.on('data', c=>chunks.push(c));
+    doc.on('end', ()=>resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const agents = reports.slice().sort((a, b) =>
+      ((b.totals?.resolved || 0) - (a.totals?.resolved || 0)) || String(a.name).localeCompare(String(b.name)));
+    const sel = agents[0]?.selected || [];
+    const inc = (k)=>sel.includes(k);
+    const M = 40, PW = doc.page.width, W = PW - 2*M, BOTTOM = doc.page.height - 56, ROW_H = 22;
+    let y = M;
+    const ensure = (h) => { if (y + h > BOTTOM) { doc.addPage(); y = M; return true; } return false; };
+    const sectionTitle = (title, note, keep = 30) => {
+      ensure(Math.min(36 + keep, BOTTOM - M));
+      y += 8;
+      doc.font('Helvetica-Bold').fontSize(12).fillColor(C.ink).text(title, M, y, { lineBreak:false });
+      if (note) doc.font('Helvetica').fontSize(8.5).fillColor(C.muted).text(note, M, y + 2, { width:W, align:'right', lineBreak:false });
+      y += 18;
+      doc.moveTo(M, y).lineTo(M + W, y).lineWidth(0.75).strokeColor(C.line).stroke();
+      y += 10;
+    };
+    // cols = [{ label, width, align }], rows = arrays of strings or { text, color }
+    const drawTable = (cols, rows, { totalRow } = {}) => {
+      const header = () => {
+        doc.rect(M, y, W, ROW_H).fill(C.head);
+        let x = M;
+        for (const c of cols) {
+          doc.font('Helvetica-Bold').fontSize(7.5).fillColor(C.muted)
+             .text(c.label.toUpperCase(), x + 6, y + 8, { width:c.width - 12, align:c.align || 'left', lineBreak:false, characterSpacing:0.3 });
+          x += c.width;
+        }
+        y += ROW_H;
+      };
+      ensure(ROW_H * 2); header();
+      const all = totalRow ? [...rows, totalRow] : rows;
+      all.forEach((cells, ri) => {
+        const isTotal = totalRow && ri === all.length - 1;
+        if (ensure(ROW_H)) header();
+        if (isTotal) doc.moveTo(M, y).lineTo(M + W, y).lineWidth(1).strokeColor(C.ink).stroke();
+        else if (ri % 2) doc.rect(M, y, W, ROW_H).fill(C.panel);
+        let x = M;
+        cells.forEach((cell, ci) => {
+          const c = cols[ci], v = typeof cell === 'object' && cell ? cell : { text:cell };
+          doc.font(isTotal || ci === 0 || v.color ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.5)
+             .fillColor(v.color || (isTotal ? C.ink : C.body))
+             .text(String(v.text ?? '–'), x + 6, y + 7.5, { width:c.width - 12, align:c.align || 'left', lineBreak:false, ellipsis:true });
+          x += c.width;
+        });
+        y += ROW_H;
+      });
+      doc.moveTo(M, y).lineTo(M + W, y).lineWidth(0.75).strokeColor(C.line).stroke();
+      y += 6;
+    };
+    // colour a value only when it is off target
+    const flagged = (text, flag) => flag && flag !== 'green' ? { text, color:FLAG_COLOR[flag] } : text;
+    const sumT = (k) => agents.reduce((s, r) => s + (+r.totals?.[k] || 0), 0);
+    const avgT = (k) => { const v = agents.map(r => +r.totals?.[k] || 0).filter(n => n > 0); return v.length ? +(v.reduce((s, n) => s + n, 0) / v.length).toFixed(1) : 0; };
+
+    // ── Team totals ──
+    const team = {
+      resolved:sumT('resolved'), closed:sumT('closed'),
+      newTickets:agents.reduce((s, r) => s + (r.weekly || []).reduce((ws, w) => ws + (+w.newTickets || 0), 0), 0),
+      avgResponseMin:avgT('avgResponseMin'), firstReplyMin:avgT('firstReplyMin'),
+      slaDue:sumT('slaDue'), slaBreached:sumT('slaBreached'),
+      lateShifts:sumT('lateShifts'), offBreaks:sumT('offBreaks'),
+    };
+    team.slaBreachPct = team.slaDue ? +((team.slaBreached / team.slaDue) * 100).toFixed(1) : 0;
+    const teamFlags = {
+      avg_response:flagFor('avg_response', team.avgResponseMin, thresholds),
+      sla_breach_pct:flagFor('sla_breach_pct', team.slaBreachPct, thresholds),
+    };
+    const countFlag = (metric, color) => agents.filter(r => r.flags?.[metric] === color).length;
+
+    // ── Header band ──
+    doc.rect(0, 0, PW, 104).fill(C.brand);
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.brandSub)
+       .text('TEAM PERFORMANCE REPORT', M, 30, { characterSpacing:1.5, lineBreak:false });
+    doc.font('Helvetica-Bold').fontSize(22).fillColor('#ffffff').text(month, M, 46, { lineBreak:false });
+    doc.font('Helvetica').fontSize(8.5).fillColor(C.brandSub)
+       .text(`Generated ${new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}`, M, 76, { lineBreak:false });
+    doc.font('Helvetica-Bold').fontSize(13).fillColor('#ffffff').text('All agents', M, 46, { width:W, align:'right', lineBreak:false });
+    doc.font('Helvetica').fontSize(9.5).fillColor(C.brandSub).text(`${agents.length} agent${agents.length === 1 ? '' : 's'}`, M, 64, { width:W, align:'right', lineBreak:false });
+    y = 124;
+
+    // ── Agents needing attention ──
+    const attention = [];
+    for (const r of agents) {
+      const t = r.totals || {}, f = r.flags || {}, items = [];
+      if (inc('late_shifts')  && f.late_shifts === 'red')    items.push(`${t.lateShifts} late shifts`);
+      if (inc('off_breaks')   && f.off_breaks === 'red')     items.push(`${t.offBreaks} off-schedule breaks`);
+      if (inc('avg_response') && f.avg_response === 'red')   items.push(`${fmtMin(t.avgResponseMin)} avg response`);
+      if (inc('sla')          && f.sla_breach_pct === 'red') items.push(`${t.slaBreachPct}% SLA breach`);
+      if (items.length) attention.push([r.name || r.email, items.join(', ')]);
+    }
+    {
+      const tone = attention.length ? 'red' : 'green';
+      const h = attention.length ? 34 + attention.length * 16 : 36;
+      ensure(h);
+      doc.roundedRect(M, y, W, h, 6).fill(FLAG_TINT[tone]);
+      doc.rect(M, y, 4, h).fill(FLAG_COLOR[tone]);
+      doc.font('Helvetica-Bold').fontSize(10.5).fillColor(FLAG_COLOR[tone])
+         .text(attention.length ? `Agents needing attention (${attention.length} of ${agents.length})` : `No agents with red-flag concerns this ${unit}`, M + 18, y + 12, { lineBreak:false });
+      let cy = y + 32;
+      for (const [name, detail] of attention) {
+        doc.circle(M + 22, cy + 4, 2.2).fill(FLAG_COLOR.red);
+        doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.ink).text(name, M + 32, cy, { continued:true })
+           .font('Helvetica').fillColor(C.body).text(`  –  ${detail}`, { lineBreak:false });
+        cy += 16;
+      }
+      y += h + 14;
+    }
+
+    // ── Team KPI cards ──
+    const cards = [];
+    if (inc('resolved_closed')) {
+      cards.push({ label:'Resolved', value:String(team.resolved), sub:`${fmtNum(team.resolved / (agents.length || 1))} per agent` });
+      cards.push({ label:'Closed', value:String(team.closed), sub:`${fmtNum(team.closed / (agents.length || 1))} per agent` });
+    }
+    if (inc('avg_response')) cards.push({ label:'Avg response', value:fmtMin(team.avgResponseMin), sub:'average across agents', flag:teamFlags.avg_response });
+    if (inc('first_reply'))  cards.push({ label:'Avg first reply', value:fmtMin(team.firstReplyMin), sub:'average across agents' });
+    if (inc('sla'))          cards.push({ label:'Response-SLA breach', value:`${team.slaBreachPct}%`, sub:`${team.slaBreached} of ${team.slaDue} due`, flag:teamFlags.sla_breach_pct });
+    if (inc('late_shifts'))  cards.push({ label:'Late shifts', value:String(team.lateShifts), sub:`${countFlag('late_shifts', 'red')} agents flagged red` });
+    if (inc('off_breaks'))   cards.push({ label:'Off-schedule breaks', value:String(team.offBreaks), sub:`${countFlag('off_breaks', 'red')} agents flagged red` });
+    if (cards.length) {
+      sectionTitle('Team at a glance');
+      const perRow = 4, gap = 10, cw = (W - gap*(perRow-1)) / perRow, ch = 64;
+      cards.forEach((c, i) => {
+        if (i % perRow === 0 && i) y += ch + gap;
+        if (i % perRow === 0) ensure(ch);
+        const x = M + (i % perRow) * (cw + gap);
+        doc.roundedRect(x, y, cw, ch, 5).fill(C.panel);
+        doc.rect(x, y, 3, ch).fill(c.flag ? FLAG_COLOR[c.flag] : C.neutral);
+        doc.font('Helvetica').fontSize(8).fillColor(C.muted).text(c.label, x + 12, y + 10, { width:cw - 30, lineBreak:false, ellipsis:true });
+        if (c.flag) doc.circle(x + cw - 12, y + 14, 3.5).fill(FLAG_COLOR[c.flag]);
+        doc.font('Helvetica-Bold').fontSize(19).fillColor(C.ink).text(c.value, x + 12, y + 25, { width:cw - 20, lineBreak:false });
+        if (c.sub) doc.font('Helvetica').fontSize(7.5).fillColor(C.faint).text(c.sub, x + 12, y + 50, { lineBreak:false });
+      });
+      y += ch + 8;
+      let lx = M;
+      for (const k of ['green','yellow','red']) {
+        doc.circle(lx + 3, y + 4, 3).fill(FLAG_COLOR[k]);
+        doc.font('Helvetica').fontSize(7.5).fillColor(C.muted).text(FLAG_LABEL[k], lx + 10, y + 1, { lineBreak:false });
+        lx += 18 + doc.widthOfString(FLAG_LABEL[k]) + 6;
+      }
+      y += 14;
+    }
+
+    // ── Agent comparison ──
+    {
+      const metricCols = [];
+      if (inc('resolved_closed')) {
+        metricCols.push({ label:'Resolved', width:56, align:'right', cell:r => String(r.totals?.resolved ?? 0), total:String(team.resolved) });
+        metricCols.push({ label:'Closed',   width:50, align:'right', cell:r => String(r.totals?.closed ?? 0),   total:String(team.closed) });
+      }
+      if (inc('avg_response')) metricCols.push({ label:'Avg resp.', width:62, align:'right',
+        cell:r => flagged(fmtMin(r.totals?.avgResponseMin), r.flags?.avg_response), total:flagged(fmtMin(team.avgResponseMin), teamFlags.avg_response) });
+      if (inc('first_reply'))  metricCols.push({ label:'1st reply', width:62, align:'right',
+        cell:r => fmtMin(r.totals?.firstReplyMin), total:fmtMin(team.firstReplyMin) });
+      if (inc('sla'))          metricCols.push({ label:'SLA breach', width:70, align:'right',
+        cell:r => flagged(r.totals?.slaDue ? `${r.totals.slaBreachPct}%` : '–', r.flags?.sla_breach_pct),
+        total:flagged(team.slaDue ? `${team.slaBreachPct}%` : '–', teamFlags.sla_breach_pct) });
+      if (inc('late_shifts'))  metricCols.push({ label:'Late', width:42, align:'right',
+        cell:r => flagged(String(r.totals?.lateShifts ?? 0), r.flags?.late_shifts), total:String(team.lateShifts) });
+      if (inc('off_breaks'))   metricCols.push({ label:'Off-brk', width:50, align:'right',
+        cell:r => flagged(String(r.totals?.offBreaks ?? 0), r.flags?.off_breaks), total:String(team.offBreaks) });
+      const used = metricCols.reduce((s, c) => s + c.width, 0);
+      const cols = [{ label:'Agent', width:W - used }, ...metricCols];
+      sectionTitle('Agent comparison', 'Sorted by tickets resolved', (agents.length + 2) * ROW_H);
+      drawTable(cols, agents.map(r => [r.name || r.email, ...metricCols.map(c => c.cell(r))]),
+        { totalRow:['Team', ...metricCols.map(c => c.total)] });
+    }
+
+    // ── Weekly team breakdown ──
+    const weekCount = Math.max(0, ...agents.map(r => (r.weekly || []).length));
+    if (weekCount) {
+      const weeks = [];
+      for (let i = 0; i < weekCount; i++) {
+        const ws = agents.map(r => r.weekly?.[i]).filter(Boolean);
+        const sumW = (k) => ws.reduce((s, w) => s + (+w[k] || 0), 0);
+        const avgW = (k) => { const v = ws.map(w => +w[k] || 0).filter(n => n > 0); return v.length ? v.reduce((s, n) => s + n, 0) / v.length : 0; };
+        const due = sumW('slaDue'), br = sumW('slaBreached');
+        weeks.push([weekLabel(ws[0]?.label), String(sumW('newTickets')), String(sumW('resolved')), String(sumW('closed')),
+          fmtMin(avgW('avgResponseMin')), fmtMin(avgW('firstReplyMin')), due ? `${+((br / due) * 100).toFixed(1)}%` : '–']);
+      }
+      sectionTitle('Weekly team breakdown', 'Totals across all agents; times averaged', (weeks.length + 2) * ROW_H);
+      drawTable([
+        { label:'Week', width:W - 398 },
+        { label:'New', width:52, align:'right' }, { label:'Resolved', width:64, align:'right' },
+        { label:'Closed', width:56, align:'right' }, { label:'Avg resp.', width:70, align:'right' },
+        { label:'1st reply', width:70, align:'right' }, { label:'SLA breach', width:86, align:'right' },
+      ], weeks, { totalRow:[`${Unit} total`, String(team.newTickets), String(team.resolved), String(team.closed),
+        fmtMin(team.avgResponseMin), fmtMin(team.firstReplyMin),
+        flagged(team.slaDue ? `${team.slaBreachPct}%` : '–', teamFlags.sla_breach_pct)] });
+    }
+
+    // ── Attendance ──
+    if (inc('late_shifts') || inc('off_breaks')) {
+      const rows = agents
+        .map(r => {
+          const mins = (r.lateDetail || []).map(l => +l.lateMin || 0);
+          return { r, mins, total:mins.reduce((s, n) => s + n, 0) };
+        })
+        .sort((a, b) => (b.r.totals?.lateShifts || 0) - (a.r.totals?.lateShifts || 0) || b.total - a.total)
+        .map(({ r, mins, total }) => [
+          r.name || r.email,
+          ...(inc('late_shifts') ? [flagged(String(r.totals?.lateShifts ?? 0), r.flags?.late_shifts), fmtMin(total), fmtMin(mins.length ? Math.max(...mins) : 0)] : []),
+          ...(inc('off_breaks') ? [flagged(String(r.totals?.offBreaks ?? 0), r.flags?.off_breaks)] : []),
+        ]);
+      const cols = [
+        ...(inc('late_shifts') ? [{ label:'Late days', width:70, align:'right' }, { label:'Total late', width:80, align:'right' }, { label:'Longest', width:70, align:'right' }] : []),
+        ...(inc('off_breaks') ? [{ label:'Off-schedule breaks', width:120, align:'right' }] : []),
+      ];
+      sectionTitle('Attendance', 'Sorted by late days', (rows.length + 1) * ROW_H);
+      drawTable([{ label:'Agent', width:W - cols.reduce((s, c) => s + c.width, 0) }, ...cols], rows);
+    }
+
+    // ── Ticket statuses (team totals) ──
+    if (inc('custom') || inc('a2p') || inc('ghl')) {
+      const custom = {};
+      for (const r of agents) for (const [k, v] of Object.entries(r.totals?.custom || {})) custom[k] = (custom[k] || 0) + (+v || 0);
+      const entries = Object.entries(custom).sort((a, b) => b[1] - a[1]);
+      if (entries.length) {
+        sectionTitle('Ticket statuses', `Team total for the ${unit}`, (entries.length + 1) * ROW_H);
+        drawTable([{ label:'Status', width:W - 120 }, { label:'Tickets', width:120, align:'right' }],
+          entries.map(([k, v]) => [k, String(v)]));
+      }
+    }
+
+    // ── Footer on every page ──
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.page.margins.bottom = 0;
+      const fy = doc.page.height - 34;
+      doc.moveTo(M, fy - 8).lineTo(M + W, fy - 8).lineWidth(0.5).strokeColor(C.line).stroke();
+      doc.font('Helvetica').fontSize(7.5).fillColor(C.faint);
+      doc.text(`Team report · ${month}`, M, fy, { width:W / 3, lineBreak:false, ellipsis:true });
+      doc.text('Confidential – for performance discussion only', M, fy, { width:W, align:'center', lineBreak:false });
+      doc.text(`Page ${i - range.start + 1} of ${range.count}`, M, fy, { width:W, align:'right', lineBreak:false });
+    }
+
+    doc.end();
+  });
+}
+const fmtNum = (n) => (+n || 0).toFixed(1).replace(/\.0$/, '');
+
+// ── GROUP REPORTS (by the ticket's Freshdesk group) ──
+const blankGroupAcc = () => ({ newTickets:0, resolved:0, closed:0, respSum:0, respCount:0, frSum:0, frCount:0, slaDue:0, slaBreached:0, overdue:0 });
+function addGroupRow(acc, r) {
+  acc.newTickets += +r.new_tickets || 0; acc.resolved += +r.resolved || 0; acc.closed += +r.closed || 0;
+  acc.respSum += +r.resp_sum_min || 0;   acc.respCount += +r.resp_count || 0;
+  acc.frSum += +r.fr_sum_min || 0;       acc.frCount += +r.fr_count || 0;
+  acc.slaDue += +r.sla_due || 0;         acc.slaBreached += +r.sla_breached || 0; acc.overdue += +r.overdue || 0;
+}
+// Times are weighted by ticket count (sum ÷ count), so they combine correctly.
+const finishGroupAcc = ({ respSum, respCount, frSum, frCount, ...acc }) => ({
+  ...acc,
+  avgResponseMin: respCount ? +(respSum / respCount).toFixed(1) : 0,
+  firstReplyMin:  frCount ? +(frSum / frCount).toFixed(1) : 0,
+  slaBreachPct:   acc.slaDue ? +((acc.slaBreached / acc.slaDue) * 100).toFixed(1) : 0,
+});
+const groupActivity = (t) => t.newTickets + t.resolved + t.closed + t.slaDue + t.overdue;
+
+/**
+ * Per-group totals, per-agent breakdown and weekly split for an inclusive range.
+ * Returns { from, to, dataFrom, groups } — dataFrom = earliest group data stored
+ * (group stats only exist from when collection started).
+ */
+async function buildGroupReports(fromDate, toDate) {
+  const [rows, agents] = await Promise.all([D.getGroupStatsRange(fromDate, toDate), D.getAgents()]);
+  const names = {}; agents.forEach(a => names[a.email] = a.name || a.email);
+  const weeks = weeksOfRange(fromDate, toDate);
+  const groups = {}, all = blankGroupAcc();
+  let dataFrom = null;
+  for (const r of rows) {   // ordered by id, so the latest group_name wins
+    if (!dataFrom || r.stat_date < dataFrom) dataFrom = r.stat_date;
+    addGroupRow(all, r);
+    const G = groups[r.group_id] = groups[r.group_id] || {
+      id:r.group_id, name:r.group_name, totals:blankGroupAcc(), agents:{},
+      weekly: weeks.map(w => ({ label:w.label, days:new Set(w.days), acc:blankGroupAcc() })),
+    };
+    if (r.group_name) G.name = r.group_name;
+    addGroupRow(G.totals, r);
+    addGroupRow(G.agents[r.agent_email] = G.agents[r.agent_email] || blankGroupAcc(), r);
+    const w = G.weekly.find(w => w.days.has(r.stat_date)); if (w) addGroupRow(w.acc, r);
+  }
+  const out = Object.values(groups).map(G => ({
+    id:G.id, name:G.name || (G.id ? `Group ${G.id}` : 'No group'),
+    totals: finishGroupAcc(G.totals),
+    agents: Object.entries(G.agents).map(([email, acc]) => ({ email, name:names[email] || email, ...finishGroupAcc(acc) }))
+      .filter(groupActivity).sort((a, b) => b.resolved - a.resolved || b.closed - a.closed || a.name.localeCompare(b.name)),
+    weekly: G.weekly.map(w => ({ label:w.label, ...finishGroupAcc(w.acc) })),
+  })).filter(g => groupActivity(g.totals))
+    // busiest first; "No group" last
+    .sort((a, b) => (!a.id) - (!b.id) || (b.totals.resolved + b.totals.closed) - (a.totals.resolved + a.totals.closed));
+  return { from:fromDate, to:toDate, dataFrom, groups:out, totals:finishGroupAcc(all) };
+}
+
+// Shared page layout for the group PDF: header band, section titles, callouts,
+// tables and footers, all tracking the current y position in `L.y`.
+function pdfLayout(doc) {
+  const L = { M:40, W:doc.page.width - 80, BOTTOM:doc.page.height - 56, ROW_H:22, y:40 };
+  L.ensure = (h) => { if (L.y + h > L.BOTTOM) { doc.addPage(); L.y = L.M; return true; } return false; };
+  L.header = ({ kicker, title, right, rightSub }) => {
+    const { M, W } = L;
+    doc.rect(0, 0, doc.page.width, 104).fill(C.brand);
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.brandSub).text(kicker, M, 30, { characterSpacing:1.5, lineBreak:false });
+    doc.font('Helvetica-Bold').fontSize(22).fillColor('#ffffff').text(title, M, 46, { lineBreak:false });
+    doc.font('Helvetica').fontSize(8.5).fillColor(C.brandSub)
+       .text(`Generated ${new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}`, M, 76, { lineBreak:false });
+    doc.font('Helvetica-Bold').fontSize(13).fillColor('#ffffff').text(right, M, 46, { width:W, align:'right', lineBreak:false });
+    doc.font('Helvetica').fontSize(9.5).fillColor(C.brandSub).text(rightSub, M, 64, { width:W, align:'right', lineBreak:false });
+    L.y = 124;
+  };
+  L.sectionTitle = (title, note, keep = 30) => {
+    const { M, W } = L;
+    L.ensure(Math.min(36 + keep, L.BOTTOM - M));
+    L.y += 8;
+    doc.font('Helvetica-Bold').fontSize(12).fillColor(C.ink).text(title, M, L.y, { width:W * 0.62, lineBreak:false, ellipsis:true });
+    if (note) doc.font('Helvetica').fontSize(8.5).fillColor(C.muted).text(note, M, L.y + 2, { width:W, align:'right', lineBreak:false });
+    L.y += 18;
+    doc.moveTo(M, L.y).lineTo(M + W, L.y).lineWidth(0.75).strokeColor(C.line).stroke();
+    L.y += 10;
+  };
+  // tone: green|yellow|red; lines: [[boldPart, rest], ...]
+  L.callout = (tone, title, lines = []) => {
+    const { M, W } = L, h = lines.length ? 34 + lines.length * 16 : 36;
+    L.ensure(h);
+    doc.roundedRect(M, L.y, W, h, 6).fill(FLAG_TINT[tone]);
+    doc.rect(M, L.y, 4, h).fill(FLAG_COLOR[tone]);
+    doc.font('Helvetica-Bold').fontSize(10.5).fillColor(FLAG_COLOR[tone]).text(title, M + 18, L.y + 12, { lineBreak:false });
+    let cy = L.y + 32;
+    for (const [bold, rest] of lines) {
+      doc.circle(M + 22, cy + 4, 2.2).fill(FLAG_COLOR[tone]);
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.ink).text(bold, M + 32, cy, { continued:!!rest, lineBreak:false });
+      if (rest) doc.font('Helvetica').fillColor(C.body).text(rest, { lineBreak:false });
+      cy += 16;
+    }
+    L.y += h + 14;
+  };
+  // Trim text to fit `width` at the current font (pdfkit wraps rather than clips).
+  const fit = (text, width) => {
+    if (doc.widthOfString(text) <= width) return text;
+    let t = text;
+    while (t.length > 1 && doc.widthOfString(t + '…') > width) t = t.slice(0, -1);
+    return t.trimEnd() + '…';
+  };
+  // cols = [{ label, width, align }], rows = arrays of strings or { text, color }
+  L.table = (cols, rows, { totalRow } = {}) => {
+    const { M, W, ROW_H } = L;
+    const header = () => {
+      doc.rect(M, L.y, W, ROW_H).fill(C.head);
+      let x = M;
+      for (const c of cols) {
+        doc.font('Helvetica-Bold').fontSize(7.5).fillColor(C.muted)
+           .text(c.label.toUpperCase(), x + 6, L.y + 8, { width:c.width - 12, align:c.align || 'left', lineBreak:false, characterSpacing:0.3 });
+        x += c.width;
+      }
+      L.y += ROW_H;
+    };
+    L.ensure(ROW_H * 2); header();
+    const all = totalRow ? [...rows, totalRow] : rows;
+    all.forEach((cells, ri) => {
+      const isTotal = totalRow && ri === all.length - 1;
+      if (L.ensure(ROW_H)) header();
+      if (isTotal) doc.moveTo(M, L.y).lineTo(M + W, L.y).lineWidth(1).strokeColor(C.ink).stroke();
+      else if (ri % 2) doc.rect(M, L.y, W, ROW_H).fill(C.panel);
+      let x = M;
+      cells.forEach((cell, ci) => {
+        const c = cols[ci], v = typeof cell === 'object' && cell ? cell : { text:cell };
+        doc.font(isTotal || ci === 0 || v.color ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.5)
+           .fillColor(v.color || (isTotal ? C.ink : C.body));
+        doc.text(fit(String(v.text ?? '–'), c.width - 12), x + 6, L.y + 7.5, { width:c.width - 12, align:c.align || 'left', lineBreak:false });
+        x += c.width;
+      });
+      L.y += ROW_H;
+    });
+    doc.moveTo(M, L.y).lineTo(M + W, L.y).lineWidth(0.75).strokeColor(C.line).stroke();
+    L.y += 6;
+  };
+  L.footers = (left) => {
+    const { M, W } = L, range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.page.margins.bottom = 0;
+      const fy = doc.page.height - 34;
+      doc.moveTo(M, fy - 8).lineTo(M + W, fy - 8).lineWidth(0.5).strokeColor(C.line).stroke();
+      doc.font('Helvetica').fontSize(7.5).fillColor(C.faint);
+      doc.text(left, M, fy, { width:W / 3, lineBreak:false, ellipsis:true });
+      doc.text('Confidential – for performance discussion only', M, fy, { width:W, align:'center', lineBreak:false });
+      doc.text(`Page ${i - range.start + 1} of ${range.count}`, M, fy, { width:W, align:'right', lineBreak:false });
+    }
+  };
+  return L;
+}
+
+/**
+ * One PDF covering every ticket group for the period.
+ * data = buildGroupReports() result; monthKey set → labelled as that month.
+ */
+function generateGroupPDF(data, { monthKey, thresholds = DEFAULT_THRESHOLDS } = {}) {
+  return new Promise((resolve, reject) => {
+    const period = monthKey ? monthLabel(monthKey) : rangeLabel(data.from, data.to);
+    const unit = monthKey ? 'month' : 'period', Unit = unit[0].toUpperCase() + unit.slice(1);
+    const doc = new PDFDocument({ size:'A4', margin:40, bufferPages:true,
+      info:{ Title:`Group Performance Report – ${period}`, Author:'Activity Monitor' } });
+    const chunks = [];
+    doc.on('data', c=>chunks.push(c));
+    doc.on('end', ()=>resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const L = pdfLayout(doc), groups = data.groups || [];
+    const flagged = (text, flag) => flag && flag !== 'green' ? { text, color:FLAG_COLOR[flag] } : text;
+    const respCell = (t) => flagged(fmtMin(t.avgResponseMin), t.avgResponseMin ? flagFor('avg_response', t.avgResponseMin, thresholds) : null);
+    const slaCell  = (t) => flagged(t.slaDue ? `${t.slaBreachPct}%` : '–', t.slaDue ? flagFor('sla_breach_pct', t.slaBreachPct, thresholds) : null);
+    const overdueCell = (t) => t.overdue ? { text:String(t.overdue), color:FLAG_COLOR.red } : '0';
+    // Metric columns shared by every table; first column is the row label.
+    const metricCols = [
+      { label:'New', width:44, align:'right' }, { label:'Resolved', width:58, align:'right' },
+      { label:'Closed', width:50, align:'right' }, { label:'Avg resp.', width:60, align:'right' },
+      { label:'1st reply', width:60, align:'right' }, { label:'SLA breach', width:66, align:'right' },
+      { label:'Overdue', width:54, align:'right' },
+    ];
+    const used = metricCols.reduce((s, c) => s + c.width, 0);
+    const cells = (t) => [String(t.newTickets), String(t.resolved), String(t.closed), respCell(t), fmtMin(t.firstReplyMin), slaCell(t), overdueCell(t)];
+
+    L.header({ kicker:'GROUP PERFORMANCE REPORT', title:period, right:'All groups',
+      rightSub:`${groups.length} group${groups.length === 1 ? '' : 's'} with activity` });
+
+    // Data coverage note: group stats only exist from when collection started.
+    if (!groups.length) {
+      L.callout('yellow', `No group data for this ${unit} yet`,
+        [['Group stats are collected by each poll from the day this feature went live.', '']]);
+    } else if (data.dataFrom && data.dataFrom > data.from) {
+      L.callout('yellow', `Partial ${unit}: group data starts ${dayLabel(data.dataFrom)}`,
+        [['Earlier days are not included', ' – group stats are collected from the day this feature went live.']]);
+    }
+
+    if (groups.length) {
+      const totals = data.totals;
+
+      // ── Group comparison ──
+      L.sectionTitle('Group comparison', 'Busiest groups first', (groups.length + 2) * L.ROW_H);
+      L.table([{ label:'Group', width:L.W - used }, ...metricCols],
+        groups.map(g => [g.name, ...cells(g.totals)]),
+        { totalRow:['All groups', ...cells(totals)] });
+
+      // ── One section per group ──
+      for (const g of groups) {
+        const agentRows = g.agents.map(a => [a.name, ...cells(a)]);
+        const weekRows = g.weekly.filter(groupActivity).map(w => [weekLabel(w.label), ...cells(w)]);
+        L.sectionTitle(g.name, `${g.agents.length} agent${g.agents.length === 1 ? '' : 's'} · ${g.totals.resolved} resolved · ${g.totals.closed} closed`,
+          (agentRows.length + 2) * L.ROW_H);
+        L.table([{ label:'Agent', width:L.W - used }, ...metricCols], agentRows,
+          { totalRow:[`${Unit} total`, ...cells(g.totals)] });
+        if (weekRows.length > 1) {
+          L.ensure((weekRows.length + 1) * L.ROW_H + 4);
+          L.y += 4;
+          L.table([{ label:'Week', width:L.W - used }, ...metricCols], weekRows);
+        }
+      }
+    }
+
+    L.footers(`Group report · ${period}`);
+    doc.end();
+  });
+}
+
+module.exports = { buildMonthlyReports, buildRangeReports, buildGroupReports, generatePDF, generateTeamPDF, generateGroupPDF, monthBounds, weeksOfMonth, DEFAULT_THRESHOLDS };

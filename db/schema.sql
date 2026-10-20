@@ -158,6 +158,32 @@ create table if not exists monthly_reports (
   unique (month_key, agent_email)
 );
 
+-- ── Daily per-agent stats split by the ticket's Freshdesk group ──
+-- Collected by the same poll as daily_stats, from the same tickets. Times are
+-- stored as sum + count so they average correctly across agents and days.
+-- group_id 0 = ticket has no group.
+create table if not exists group_daily_stats (
+  id              bigint generated always as identity primary key,
+  agent_email     text not null,
+  group_id        bigint not null,
+  group_name      text,
+  stat_date       date not null,        -- same window-start date as daily_stats
+  new_tickets     integer default 0,
+  resolved        integer default 0,
+  closed          integer default 0,
+  resp_sum_min    numeric default 0,
+  resp_count      integer default 0,
+  fr_sum_min      numeric default 0,
+  fr_count        integer default 0,
+  sla_due         integer default 0,
+  sla_breached    integer default 0,
+  overdue         integer default 0,    -- waiting on a reply past OVERDUE_AFTER_HOURS
+  updated_at      timestamptz default now(),
+  unique (agent_email, group_id, stat_date)
+);
+create index if not exists idx_group_stats_date  on group_daily_stats(stat_date);
+create index if not exists idx_group_stats_group on group_daily_stats(group_id);
+
 create index if not exists idx_late_email   on late_shifts(agent_email);
 create index if not exists idx_late_month    on late_shifts(month_key);
 create index if not exists idx_sla_email      on sla_daily(agent_email);

@@ -342,12 +342,22 @@ tr:hover td{background:rgba(255,255,255,.015)}
     <div id="tab-reports" class="hidden">
       <div class="panel">
         <div class="panel-head">
-          <div class="panel-title">📄 Monthly Reports</div>
+          <div class="panel-title">📄 Reports</div>
+          <!-- one control bar: Month (stored reports) or Date range (computed on the fly) -->
           <div class="switcher" style="gap:6px;flex-wrap:wrap">
-            <label class="mono" style="color:var(--dim)">Month:</label>
-            <input type="month" id="repMonth" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
-            <button class="btn primary" onclick="generateReports()">⚙ Generate</button>
-            <button class="btn" onclick="loadReports()">↻ Load</button>
+            <label class="mono" style="color:var(--dim)">Period:</label>
+            <select id="repMode" onchange="repModeChanged()">
+              <option value="month">Month</option>
+              <option value="range">Date range</option>
+            </select>
+            <input type="month" id="repMonth" class="rep-month" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
+            <input type="date" id="repFrom" class="rep-range hidden" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
+            <span class="mono rep-range hidden" style="color:var(--dim)">to</span>
+            <input type="date" id="repTo" class="rep-range hidden" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
+            <button class="btn primary rep-month" onclick="generateReports()">⚙ Generate</button>
+            <button class="btn" onclick="repIsRange()?loadRangeReports():loadReports()">↻ Load</button>
+            <button class="btn" onclick="dlTeamPdf(repIsRange())">⬇ Team PDF</button>
+            <button class="btn" onclick="dlTeamPdf(repIsRange(),'group')">⬇ Group PDF</button>
           </div>
         </div>
 
@@ -711,7 +721,10 @@ function switchTab(t){
   if(t==='agents')loadAgents();
   if(t==='statuses'){ loadFdStatuses(); loadStatuses(); }
   if(t==='history'){ fillHistAgentDropdown(); if(!histFrom){histRange(7);} }
-  if(t==='reports'){ if(!document.getElementById('repMonth').value){const d=new Date();d.setMonth(d.getMonth()-1);document.getElementById('repMonth').value=d.toISOString().slice(0,7);} loadThresholds(); loadReports(); }
+  if(t==='reports'){ if(!document.getElementById('repMonth').value){const d=new Date();d.setMonth(d.getMonth()-1);document.getElementById('repMonth').value=d.toISOString().slice(0,7);}
+    const rf=document.getElementById('repFrom'), rt=document.getElementById('repTo');
+    if(!rf.value||!rt.value){ const now=new Date(), loc=(x)=>new Date(x-x.getTimezoneOffset()*60000).toISOString().slice(0,10); rt.value=loc(now); rf.value=loc(new Date(now.getFullYear(),now.getMonth(),1)); }
+    loadThresholds(); repModeChanged(); }
 }
 
 // HISTORY
@@ -803,21 +816,61 @@ async function loadReports(){
   try{
     const r=await authFetch('/api/reports?month='+month); const d=await r.json(); if(!d.ok)throw new Error(d.error);
     if(!d.reports.length){tb.innerHTML='<tr><td colspan="7" class="empty">No reports for '+month+' — click Generate</td></tr>';return;}
-    tb.innerHTML=d.reports.map(rep=>{
-      const t=rep.totals||{}; const f=rep.flags||{};
-      const dot=(flag)=>`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${flag==='red'?'#ff4d6a':flag==='yellow'?'#ffb800':'#00e5a0'};margin-right:5px"></span>`;
-      const concerns=(rep.concerns&&rep.concerns.length)?`<span style="color:var(--danger)">${rep.concerns.map(esc).join(', ')}</span>`:'<span class="empty-cell">none</span>';
-      return `<tr>
-        <td><div class="an">${esc(rep.name)}</div><div class="ae">${esc(rep.email)}</div></td>
-        <td>${concerns}</td>
-        <td><span class="num g">${t.resolved??0}</span></td>
-        <td>${dot(f.sla_breach_pct)}<span class="num">${t.slaBreachPct??0}%</span></td>
-        <td>${dot(f.late_shifts)}<span class="num">${t.lateShifts??0}</span></td>
-        <td>${dot(f.off_breaks)}<span class="num">${t.offBreaks??0}</span></td>
-        <td><a class="tkt-link" href="/api/reports/pdf?month=${month}&agent=${encodeURIComponent(rep.email)}" onclick="return dlPdf(event,this)">⬇ PDF</a></td>
-      </tr>`;
-    }).join('');
+    renderReportRows(d.reports, 'month='+month, month);
   }catch(e){ tb.innerHTML=`<tr><td colspan="7" class="empty">Error: ${esc(e.message)}</td></tr>`; }
+}
+function repIsRange(){ return document.getElementById('repMode').value==='range'; }
+function repModeChanged(){
+  const range=repIsRange();
+  document.querySelectorAll('.rep-range').forEach(el=>el.classList.toggle('hidden',!range));
+  document.querySelectorAll('.rep-month').forEach(el=>el.classList.toggle('hidden',range));
+  if(range) document.getElementById('reportsBody').innerHTML='<tr><td colspan="7" class="empty">Pick a date range and click Load</td></tr>';
+  else loadReports();
+}
+// Custom range: query string for the range endpoints, or null (with a toast) if invalid
+function rangeQuery(){
+  const from=document.getElementById('repFrom').value, to=document.getElementById('repTo').value;
+  if(!from||!to){ toast('Pick both a From and To date','err'); return null; }
+  if(from>to){ toast('From date must be on or before To date','err'); return null; }
+  return { qs:`from=${from}&to=${to}&sections=${encodeURIComponent(selectedSections().join(','))}`, label:`${from}_to_${to}` };
+}
+async function loadRangeReports(){
+  const rq=rangeQuery(); if(!rq) return;
+  const tb=document.getElementById('reportsBody');
+  tb.innerHTML='<tr><td colspan="7" class="empty">Calculating…</td></tr>';
+  try{
+    const r=await authFetch('/api/reports/range?'+rq.qs); const d=await r.json(); if(!d.ok)throw new Error(d.error);
+    if(!d.reports.length){tb.innerHTML='<tr><td colspan="7" class="empty">No agents found</td></tr>';return;}
+    renderReportRows(d.reports, rq.qs, rq.label);
+  }catch(e){ tb.innerHTML=`<tr><td colspan="7" class="empty">Error: ${esc(e.message)}</td></tr>`; }
+}
+// qs = query string the row's PDF link uses (month=… or from=…&to=…), label = filename suffix
+function renderReportRows(reports, qs, label){
+  const tb=document.getElementById('reportsBody');
+  tb.innerHTML=reports.map(rep=>{
+    const t=rep.totals||{}; const f=rep.flags||{};
+    const dot=(flag)=>`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${flag==='red'?'#ff4d6a':flag==='yellow'?'#ffb800':'#00e5a0'};margin-right:5px"></span>`;
+    const concerns=(rep.concerns&&rep.concerns.length)?`<span style="color:var(--danger)">${rep.concerns.map(esc).join(', ')}</span>`:'<span class="empty-cell">none</span>';
+    return `<tr>
+      <td><div class="an">${esc(rep.name)}</div><div class="ae">${esc(rep.email)}</div></td>
+      <td>${concerns}</td>
+      <td><span class="num g">${t.resolved??0}</span></td>
+      <td>${dot(f.sla_breach_pct)}<span class="num">${t.slaBreachPct??0}%</span></td>
+      <td>${dot(f.late_shifts)}<span class="num">${t.lateShifts??0}</span></td>
+      <td>${dot(f.off_breaks)}<span class="num">${t.offBreaks??0}</span></td>
+      <td><a class="tkt-link" href="/api/reports/pdf?${qs}&agent=${encodeURIComponent(rep.email)}" data-filename="${esc(rep.email.split('@')[0])}-${label}.pdf" onclick="return dlPdf(event,this)">⬇ PDF</a></td>
+    </tr>`;
+  }).join('');
+}
+// kind: 'team' (all agents) or 'group' (by ticket group)
+function dlTeamPdf(useRange, kind='team'){
+  let qs, label;
+  if(useRange){ const rq=rangeQuery(); if(!rq) return; qs=rq.qs; label=rq.label; }
+  else { const month=repMonthVal(); qs='month='+month; label=month; }
+  const a=document.createElement('a');
+  a.setAttribute('href',`/api/reports/${kind}-pdf?`+qs); a.dataset.filename=`${kind}-report-${label}.pdf`;
+  toast(`Preparing ${kind} PDF…`,'ok');
+  return dlPdf(new Event('click'), a);
 }
 // PDF download needs auth header → fetch as blob
 async function dlPdf(ev, el){
@@ -826,7 +879,7 @@ async function dlPdf(ev, el){
     const r=await authFetch(el.getAttribute('href'));
     if(!r.ok){ const d=await r.json().catch(()=>({})); throw new Error(d.error||('HTTP '+r.status)); }
     const blob=await r.blob(); const url=URL.createObjectURL(blob);
-    const a=document.createElement('a'); a.href=url; a.download=el.getAttribute('href').split('agent=')[1].split('&')[0]+'.pdf'; a.click();
+    const a=document.createElement('a'); a.href=url; a.download=el.dataset.filename||(el.getAttribute('href').split('agent=')[1].split('&')[0]+'.pdf'); a.click();
     URL.revokeObjectURL(url);
   }catch(e){ toast('PDF error: '+e.message,'err'); }
   return false;

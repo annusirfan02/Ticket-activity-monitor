@@ -81,6 +81,21 @@ async function fdTicketsSince(sinceIso) {
   return all;
 }
 
+// Freshdesk group id -> name, cached (groups rarely change).
+async function fdGroupNames() {
+  if (mem.groupNames && Date.now() - mem.groupNamesAt < SCHED_TTL) return mem.groupNames;
+  try {
+    const names = {};
+    for (let page = 1; page <= 5; page++) {
+      const { data } = await axios.get(`${fdBase()}/groups?per_page=100&page=${page}`, { headers: fdHeaders() });
+      for (const g of (data || [])) names[g.id] = g.name;
+      if (!data || data.length < 100) break;
+    }
+    mem.groupNames = names; mem.groupNamesAt = Date.now();
+  } catch (e) { console.warn('[FD] groups:', e.message); }
+  return mem.groupNames || {};
+}
+
 // Current (live) count of an agent's tickets in a given status — cached briefly.
 async function fdCountByStatus(agentId, statusId) {
   const key = `${agentId}:${statusId}`;
@@ -370,6 +385,13 @@ async function runPoll() {
   const tickets = await fdTicketsSince(new Date(now - 24*3600000).toISOString());
   const excludedIds = new Set(Object.keys(statusChoices || {})
     .filter(k => EXCLUDED_STATUS_RX.test(agentLabel(statusChoices[k]))).map(Number));
+  const groupNames = await fdGroupNames();
+  // email -> group id (0 = none) -> counters; mirrors `metrics` for the same tickets
+  const groupMetrics = {};
+  const groupBucket = (email, groupId) => {
+    const gid = groupId || 0, byG = groupMetrics[email] = groupMetrics[email] || {};
+    return byG[gid] = byG[gid] || { newTickets:0, resolved:0, closed:0, respSum:0, respCount:0, frSum:0, frCount:0, slaDue:0, slaBreached:0, overdue:0 };
+  };
 
   const statusAgentMap = {};
   for (const s of trackedStatuses) statusAgentMap[s.label.toLowerCase()] = new Set((s.agents||[]).map(e=>e.toLowerCase()));
@@ -438,6 +460,7 @@ async function runPoll() {
     if (!monitoredIds.includes(respId)) continue;
     const email = id2email[respId]; if (!email) continue;
     const m = metrics[email];
+    const g = groupBucket(email, t.group_id);
     const winStart = windowStart[email] || (now - 24*3600000);
 
     const upd = new Date(t.updated_at).getTime();
@@ -445,11 +468,11 @@ async function runPoll() {
     if (upd > m.lastSeen) m.lastSeen = upd;
     const sStart = todayShiftStart[email];
     if (sStart && upd >= sStart) { if (!m.firstActivityInShift || upd < m.firstActivityInShift) m.firstActivityInShift = upd; }
-    if (cre >= winStart) m.newTickets++;
+    if (cre >= winStart) { m.newTickets++; g.newTickets++; }
 
     const label = (statusChoices?.[t.status] || '').toString().toLowerCase();
-    if ((t.status===4 || label.includes('resolved')) && upd>=winStart) m.resolved++;
-    if ((t.status===5 || label.includes('closed'))   && upd>=winStart) m.closed++;
+    if ((t.status===4 || label.includes('resolved')) && upd>=winStart) { m.resolved++; g.resolved++; }
+    if ((t.status===5 || label.includes('closed'))   && upd>=winStart) { m.closed++; g.closed++; }
 
     for (const s of trackedStatuses) {
       if (CORE_STATUS_IDS.has(s.choice_id)) continue;       // Resolved/Closed have columns
@@ -463,7 +486,8 @@ async function runPoll() {
     const st = t.stats || {};
     if (st.first_responded_at) {
       const fr = (new Date(st.first_responded_at)-new Date(t.created_at))/60000;
-      if (fr>=0) { m.frSum+=fr; m.frCount++; m.respSum+=fr; m.respCount++; }
+      if (fr>=0) { m.frSum+=fr; m.frCount++; m.respSum+=fr; m.respCount++;
+                   g.frSum+=fr; g.frCount++; g.respSum+=fr; g.respCount++; }
     }
 
     // Freshdesk stats name these agent_responded_at / requester_responded_at.
@@ -475,11 +499,11 @@ async function runPoll() {
     // ── Response-due SLA metric (reports only) — uses Freshdesk's due fields ──
     const frDue = st.fr_due_by || t.fr_due_by;
     const nrDue = t.nr_due_by || st.next_response_due_by;
-    if ((frDue && !st.first_responded_at) || (nrDue && awaitingReply)) m.slaDue++;
+    if ((frDue && !st.first_responded_at) || (nrDue && awaitingReply)) { m.slaDue++; g.slaDue++; }
     const slaMissed = !closedOrResolved && (
       (!st.first_responded_at && frDue && new Date(frDue).getTime() < now) ||
       (awaitingReply && nrDue && new Date(nrDue).getTime() < now));
-    if (slaMissed) m.slaBreached++;
+    if (slaMissed) { m.slaBreached++; g.slaBreached++; }
 
     // ── Overdue LOG ──
     // Wait time is measured from when the customer STARTED waiting (their last
@@ -490,7 +514,7 @@ async function runPoll() {
                         : (!st.first_responded_at ? new Date(t.created_at).getTime() : 0);
     const waitedMs = awaitingSince ? now - awaitingSince : 0;
     const isOverdue = !closedOrResolved && awaitingSince > 0 && waitedMs >= OVERDUE_MS;
-    if (isOverdue) m.responseDue++;
+    if (isOverdue) { m.responseDue++; g.overdue++; }
 
     if (isOverdue) {
       overdueOps.upsert.push({
@@ -609,6 +633,17 @@ async function runPoll() {
         total_due: m.slaDue, breached: m.slaBreached, updated_at: new Date().toISOString(),
       });
     } catch (e) { console.error('sla persist:', e.message); }
+
+    // Persist the same day's stats split by ticket group
+    try {
+      const rows = Object.entries(groupMetrics[email] || {}).map(([gid, gm]) => ({
+        agent_email: email, group_id: +gid, group_name: +gid ? (groupNames[gid] || `Group ${gid}`) : 'No group',
+        stat_date: statDate, new_tickets: gm.newTickets, resolved: gm.resolved, closed: gm.closed,
+        resp_sum_min: +gm.respSum.toFixed(1), resp_count: gm.respCount, fr_sum_min: +gm.frSum.toFixed(1), fr_count: gm.frCount,
+        sla_due: gm.slaDue, sla_breached: gm.slaBreached, overdue: gm.overdue, updated_at: new Date().toISOString(),
+      }));
+      await D.replaceGroupStats(email, statDate, rows);
+    } catch (e) { console.error('group stats:', e.message); }
 
     // ── LATE SHIFT detection ──
     // If agent has a shift today and their first activity (lastSeen window) began
@@ -853,19 +888,101 @@ app.get('/api/reports', authMw, async (req,res)=>{
   } catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
-// Download a single agent's PDF for a month
+// Custom date range (?from=YYYY-MM-DD&to=YYYY-MM-DD[&sections=a,b]) — computed on
+// the fly, never stored. Returns null when no range was given, or { error }.
+const MAX_RANGE_DAYS = 366;
+function parseRange(q) {
+  if (!q.from && !q.to) return null;
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (!iso.test(q.from||'') || !iso.test(q.to||'') || isNaN(Date.parse(q.from)) || isNaN(Date.parse(q.to)))
+    return { error:'from and to must be dates (YYYY-MM-DD)' };
+  if (q.from > q.to) return { error:'from must be on or before to' };
+  if ((Date.parse(q.to) - Date.parse(q.from)) / 86400000 + 1 > MAX_RANGE_DAYS) return { error:`Range is limited to ${MAX_RANGE_DAYS} days` };
+  const selected = q.sections ? String(q.sections).split(',').map(s=>s.trim()).filter(Boolean) : undefined;
+  return { from:q.from, to:q.to, selected };
+}
+
+// Reports for a custom date range (summary rows, same shape as /api/reports)
+app.get('/api/reports/range', authMw, async (req,res)=>{
+  try {
+    const range = parseRange(req.query);
+    if (!range || range.error) return res.status(400).json({ok:false,error:range?.error||'from and to required'});
+    const reports = await R.buildRangeReports(range.from, range.to, { selected: range.selected });
+    res.json({ ok:true, from:range.from, to:range.to, reports: reports.map(r=>({ email:r.email, name:r.name, totals:r.totals, concerns:r.concerns, flags:r.flags })) });
+  } catch(e){ console.error(e.message); res.status(500).json({ok:false,error:e.message}); }
+});
+
+// Download a single agent's PDF for a month (stored) or a custom range (computed)
 app.get('/api/reports/pdf', authMw, async (req,res)=>{
   try {
     const { month, agent } = req.query;
-    if (!month || !agent) return res.status(400).json({ok:false,error:'month and agent required'});
-    const rows = await D.getReports(month);
-    const row = rows.find(r => r.agent_email === agent.toLowerCase().trim());
-    if (!row) return res.status(404).json({ok:false,error:'Report not found — generate it first'});
-    const pdf = await R.generatePDF(row.payload);
+    const range = parseRange(req.query);
+    if (range?.error) return res.status(400).json({ok:false,error:range.error});
+    if ((!month && !range) || !agent) return res.status(400).json({ok:false,error:'month (or from/to) and agent required'});
+    const email = agent.toLowerCase().trim();
+    let payload;
+    if (range) {
+      payload = (await R.buildRangeReports(range.from, range.to, { selected: range.selected })).find(r => r.email === email);
+      if (!payload) return res.status(404).json({ok:false,error:'Agent not found'});
+    } else {
+      const row = (await D.getReports(month)).find(r => r.agent_email === email);
+      if (!row) return res.status(404).json({ok:false,error:'Report not found — generate it first'});
+      payload = row.payload;
+    }
+    const pdf = await R.generatePDF(payload);
+    const period = range ? `${range.from}_to_${range.to}` : month;
     res.setHeader('Content-Type','application/pdf');
-    res.setHeader('Content-Disposition',`attachment; filename="report-${agent}-${month}.pdf"`);
+    res.setHeader('Content-Disposition',`attachment; filename="report-${agent}-${period}.pdf"`);
     res.send(pdf);
   } catch(e){ console.error(e.message); res.status(500).json({ok:false,error:e.message}); }
+});
+
+// Download one PDF covering all agents for a month (stored) or a custom range (computed)
+app.get('/api/reports/team-pdf', authMw, async (req,res)=>{
+  try {
+    const { month } = req.query;
+    const range = parseRange(req.query);
+    if (range?.error) return res.status(400).json({ok:false,error:range.error});
+    if (!month && !range) return res.status(400).json({ok:false,error:'month (or from/to) required'});
+    const [payloads, thRows] = await Promise.all([
+      range ? R.buildRangeReports(range.from, range.to, { selected: range.selected })
+            : D.getReports(month).then(rows => rows.map(r => r.payload)),
+      D.getThresholds(),
+    ]);
+    if (!payloads.length) return res.status(404).json({ok:false,error: range ? 'No agents found' : 'No reports for this month — generate them first'});
+    const thresholds = { ...R.DEFAULT_THRESHOLDS };
+    for (const r of thRows) thresholds[r.metric] = { green_max:+r.green_max, yellow_max:+r.yellow_max };
+    const pdf = await R.generateTeamPDF(month || range.from.slice(0,7), payloads, thresholds);
+    const period = range ? `${range.from}_to_${range.to}` : month;
+    res.setHeader('Content-Type','application/pdf');
+    res.setHeader('Content-Disposition',`attachment; filename="team-report-${period}.pdf"`);
+    res.send(pdf);
+  } catch(e){ console.error(e.message); res.status(500).json({ok:false,error:e.message}); }
+});
+
+// Download one PDF covering every ticket group, for a month or a custom range.
+// Always computed from group_daily_stats (nothing stored, no Generate step).
+app.get('/api/reports/group-pdf', authMw, async (req,res)=>{
+  try {
+    const { month } = req.query;
+    const range = parseRange(req.query);
+    if (range?.error) return res.status(400).json({ok:false,error:range.error});
+    if (!range && !/^\d{4}-\d{2}$/.test(month||'')) return res.status(400).json({ok:false,error:'month (or from/to) required'});
+    const { fromDate, toDate } = range ? { fromDate:range.from, toDate:range.to } : R.monthBounds(month);
+    const [data, thRows] = await Promise.all([R.buildGroupReports(fromDate, toDate), D.getThresholds()]);
+    const thresholds = { ...R.DEFAULT_THRESHOLDS };
+    for (const r of thRows) thresholds[r.metric] = { green_max:+r.green_max, yellow_max:+r.yellow_max };
+    const pdf = await R.generateGroupPDF(data, { monthKey: range ? null : month, thresholds });
+    const period = range ? `${range.from}_to_${range.to}` : month;
+    res.setHeader('Content-Type','application/pdf');
+    res.setHeader('Content-Disposition',`attachment; filename="group-report-${period}.pdf"`);
+    res.send(pdf);
+  } catch(e){
+    console.error(e.message);
+    if (/group_daily_stats/.test(e.message) && /schema cache|does not exist/.test(e.message))
+      return res.status(503).json({ok:false,error:'Group stats table is not set up yet — run the group_daily_stats SQL from db/schema.sql in Supabase'});
+    res.status(500).json({ok:false,error:e.message});
+  }
 });
 
 // ── THRESHOLDS ──

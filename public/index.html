@@ -419,9 +419,10 @@ tr:hover td{background:rgba(255,255,255,.015)}
 
         <div id="qEmpathy">
           <div class="mono" style="color:var(--dim);font-size:11px;padding:10px 18px;line-height:1.6">
-            Resolved and closed tickets only. A ticket is flagged when a customer message shows frustration
-            (e.g. "still not working", "ASAP", "frustrated", "no response", "!!") and the next agent reply has no acknowledgement
-            (e.g. "sorry", "I understand", "thank you for your patience"). No AI is used — the matched words are shown for each flag.
+            Resolved and closed tickets only. A ticket is flagged when a customer message is upset and the next agent reply has no
+            acknowledgement (e.g. "sorry", "I understand", "thank you for your patience"). "Upset" means a negative tone score
+            (VADER sentiment, −1 to +1, at or below −0.3) or strong emotion words ("frustrated", "unacceptable", "ridiculous", "!!").
+            Plain status updates like "still can't see it" and polite urgency ("please escalate ASAP") don't count. No AI is used.
           </div>
           <div class="tbl-scroll"><table>
             <thead><tr><th>Agent</th><th>Tickets checked</th><th>With frustration</th><th>Acknowledged</th><th>Empathy missing</th><th>Missing rate</th></tr></thead>
@@ -1008,7 +1009,7 @@ function qRender(){
     document.getElementById('qEmpFlagged').innerHTML = list.length ? list.map(t=>`<tr>
       <td><a class="tkt-link" href="${esc(t.url)}" target="_blank" rel="noopener">#${t.ticketId}</a><div class="ae">${esc(t.subject)}</div></td>
       <td>${esc(t.name)}</td><td class="mono">${qWhen(t.resolvedAt)}</td>
-      <td>${t.findings.map(f=>`<div style="margin-bottom:6px">${qMark(f.excerpt,f.cue)}<div class="ae">${qWhen(f.customer_at)}</div></div>`).join('')}</td>
+      <td>${t.findings.map(f=>`<div style="margin-bottom:6px">${qMark(f.excerpt,f.cue)}<div class="ae">${qWhen(f.customer_at)}${f.tone!=null?` · tone ${f.tone>0?'+':''}${f.tone}`:''}${f.cue==='negative tone'?' · negative tone':''}</div></div>`).join('')}</td>
       <td>${t.findings.map(f=>`<div style="margin-bottom:6px">${esc(f.reply_excerpt)}<div class="ae">${qWhen(f.reply_at)}</div></div>`).join('')}</td></tr>`).join('')
       : `<tr><td colspan="5" class="empty">No flagged tickets${d.checked?'':' — none checked in this period yet (checks run with each poll)'}</td></tr>`;
   } else {

@@ -1,33 +1,37 @@
 // api/empathy.js — rule-based (no AI) empathy check for resolved/closed tickets.
 //
-// A ticket is flagged when a customer message shows frustration and the next
-// public agent reply contains no acknowledgement phrase. Customer messages
-// without frustration cues are not judged (routine replies don't need "sorry").
-// Phrase lists are plain regexes so every flag can be explained by the exact
-// words that triggered it. Edit the lists below to tune.
-
-// Customer frustration cues. Kept specific: "not working" alone is the normal
-// content of a support ticket, so only persistence ("still not working") counts.
-const FRUSTRATION = [
-  // emotion
-  /\bfrustrat\w*/i, /\bannoy\w*/i, /\bupset\b/i, /\bangry\b/i, /\bfurious\b/i, /\bdisappoint\w*/i,
-  /\bunhappy\b/i, /\bfed up\b/i, /\b(sick|tired) of\b/i, /\bunacceptable\b/i, /\bridiculous\b/i,
+// A ticket is flagged when a customer message is upset and the next public
+// agent reply contains no acknowledgement phrase. Messages that aren't upset are
+// not judged (routine replies don't need "sorry").
+//
+// "Upset" = negative tone OR strong emotion words:
+//  - Tone is scored with VADER (vader-sentiment), a rule-based sentiment scorer
+//    for short informal text: it weighs negation, intensifiers, "but" clauses,
+//    caps and "!!", and gives -1 (very negative) … +1 (very positive). A whole
+//    message at or below NEGATIVE_TONE counts. Status updates like "still can't
+//    see it" score neutral, so they no longer trigger on their own.
+//  - Strong emotion words catch frustration VADER underrates in support
+//    language ("this is getting ridiculous", "tired of", "!!").
+// Urgency alone ("ASAP", "please escalate") is not treated as upset.
+const vader = require('vader-sentiment');
+const NEGATIVE_TONE = -0.3;
+const STRONG_EMOTION = [
+  /\bfrustrat\w*/i, /\bunacceptable\b/i, /\bridiculous\b/i, /\b(tired|sick) of\b/i, /\bfed up\b/i,
+  /\bangry\b/i, /\bfurious\b/i, /\bdisappoint\w*/i, /\bupset\b/i, /\bannoy\w*/i,
   /\b(terrible|horrible|awful|worst|useless|pathetic)\b/i, /\bwaste of (my )?(time|money)\b/i,
-  // persistence / repeat contact
-  /\bstill (not|isn'?t|doesn'?t|don'?t|hasn'?t|haven'?t|can'?t|cannot|unable|no|having|getting|seeing|waiting)\b/i,
-  /\b(yet|once) again\b/i, /\bkeeps? (happening|failing|breaking|crashing)\b/i, /\bsame (issue|problem|error) again\b/i,
-  /\b(how many|so many) times\b/i, /\bfor the (second|third|fourth|\d+(st|nd|rd|th)) time\b/i,
-  // waiting / being ignored
-  /\bno (response|reply|answer|update)s?\b/i, /\bnobody\b/i, /\bno one (has|is|responded|replied|helped)\b/i,
-  /\b(still|been) waiting\b/i, /\bhow long\b/i, /\b(hours|days|weeks) (and|with|without) no\b/i, /\bignor(ed|ing)\b/i,
-  // urgency / business impact / threats
-  /\burgent(ly)?\b/i, /\basap\b/i, /\bemergency\b/i, /\bcancel (my|our|the) (account|subscription|plan|service)\b/i,
-  /\brefund\b/i, /\blos(ing|t) (money|clients|customers|business|leads|sales)\b/i, /\bescalat\w*/i,
-  /\bcomplain\w*/i, /\bchargeback\b/i, /\blawyer\b/i,
+  /\blos(ing|t) (money|clients|customers|business|leads|sales)\b/i,
+  /\bcancel (my|our|the) (account|subscription|plan|service)\b/i,
+  /\b(how many|so many) times\b/i, /\bchargeback\b/i, /\blawyer\b/i,
+  /!{2,}/,
 ];
-// Shouting: repeated "!!". (All-caps words are not used: company names in
-// email signatures are often written in capitals.)
-const shouting = (text) => /!{2,}/.test(text) ? '!!' : null;
+const tone = (text) => vader.SentimentIntensityAnalyzer.polarity_scores(text).compound;
+// The most negative sentence, to show as the excerpt when tone alone triggered.
+function mostNegativeSentence(text) {
+  const parts = text.split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(s => s.length > 3);
+  let best = null, bestScore = Infinity;
+  for (const s of parts) { const v = tone(s); if (v < bestScore) { best = s; bestScore = v; } }
+  return best || text;
+}
 
 // Agent acknowledgement / empathy phrases.
 const EMPATHY = [
@@ -64,13 +68,19 @@ function excerpt(text, index, len) {
   const s = Math.max(0, index - 60), e = Math.min(text.length, index + len + 60);
   return (s > 0 ? '…' : '') + text.slice(s, e).replace(/\s+/g, ' ').trim() + (e < text.length ? '…' : '');
 }
+// Returns { cue, excerpt, tone } when the customer message is upset, else null.
+// cue = the strong-emotion words, or "negative tone" when VADER alone triggered.
 function frustrationCue(text) {
-  for (const rx of FRUSTRATION) {
+  const t = +tone(text).toFixed(2);
+  for (const rx of STRONG_EMOTION) {
     const m = rx.exec(text);
-    if (m) return { cue: m[0], excerpt: excerpt(text, m.index, m[0].length) };
+    if (m) return { cue: m[0], excerpt: excerpt(text, m.index, m[0].length), tone: t };
   }
-  const s = shouting(text);
-  return s ? { cue: s, excerpt: excerpt(text, Math.max(0, text.indexOf(s)), s.length) } : null;
+  if (t <= NEGATIVE_TONE) {
+    const s = mostNegativeSentence(text), i = Math.max(0, text.indexOf(s));
+    return { cue: 'negative tone', excerpt: excerpt(text, i, s.length), tone: t };
+  }
+  return null;
 }
 const empathyPhrase = (text) => { for (const rx of EMPATHY) { const m = rx.exec(text); if (m) return m[0]; } return null; };
 
@@ -92,7 +102,7 @@ function analyzeConversation(messages) {
     } else if (pending) {
       const phrase = empathyPhrase(text);
       if (phrase) acknowledged++;
-      else findings.push({ cue: pending.cue, excerpt: pending.excerpt, customer_at: pending.customer_at, reply_at: m.at,
+      else findings.push({ cue: pending.cue, tone: pending.tone, excerpt: pending.excerpt, customer_at: pending.customer_at, reply_at: m.at,
         reply_excerpt: text.replace(/\s+/g, ' ').slice(0, 160) });
       pending = null;
     }

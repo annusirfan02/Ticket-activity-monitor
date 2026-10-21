@@ -14,7 +14,11 @@
 //    language ("this is getting ridiculous", "tired of", "!!").
 // Urgency alone ("ASAP", "please escalate") is not treated as upset.
 const vader = require('vader-sentiment');
-const NEGATIVE_TONE = -0.3;
+const NEGATIVE_TONE = -0.5;
+// Support vocabulary that describes the problem, not the customer's mood. VADER
+// scores these as negative ("Error 404 when adding a card", "No other email",
+// "tel no.", "this failed"), so they're neutralised before scoring tone.
+const TECHNICAL_WORDS = /\b(no\.?|errors?|issues?|problems?|bugs?|fail(s|ed|ing|ure)?|missing|wrong|incorrect|invalid|denied|declined|rejected|rejection|stuck|unable|cannot|can'?t|not working)\b/gi;
 const STRONG_EMOTION = [
   /\bfrustrat\w*/i, /\bunacceptable\b/i, /\bridiculous\b/i, /\b(tired|sick) of\b/i, /\bfed up\b/i,
   /\bangry\b/i, /\bfurious\b/i, /\bdisappoint\w*/i, /\bupset\b/i, /\bannoy\w*/i,
@@ -24,7 +28,7 @@ const STRONG_EMOTION = [
   /\b(how many|so many) times\b/i, /\bchargeback\b/i, /\blawyer\b/i,
   /!{2,}/,
 ];
-const tone = (text) => vader.SentimentIntensityAnalyzer.polarity_scores(text).compound;
+const tone = (text) => vader.SentimentIntensityAnalyzer.polarity_scores(text.replace(TECHNICAL_WORDS, 'item')).compound;
 // The most negative sentence, to show as the excerpt when tone alone triggered.
 function mostNegativeSentence(text) {
   const parts = text.split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(s => s.length > 3);

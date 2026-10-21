@@ -9,6 +9,7 @@
 // usage: node scripts/empathy-review/save.js [--model NAME]
 // env:   SUPABASE_URL, SUPABASE_SERVICE_KEY
 require('dotenv').config();
+const { describeError } = require('./net');
 const fs = require('fs');
 const path = require('path');
 const D = require('../../api/db');
@@ -43,4 +44,4 @@ const readJson = (file) => JSON.parse(fs.readFileSync(path.join(DIR, file), 'utf
   }
   console.log(`saved: ${saved} of ${results.length}${problems.length ? `\nproblems:\n  ${problems.join('\n  ')}` : ''}`);
   if (problems.length && !saved) process.exit(1);
-})().catch(e => { console.error('ERR', e.message); process.exit(1); });
+})().catch(e => { console.error('ERR', describeError(e)); process.exit(1); });

@@ -9,6 +9,7 @@
 // usage: node scripts/empathy-review/pending.js [--days N] [--limit N]
 // env:   FRESHDESK_DOMAIN, FRESHDESK_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY
 require('dotenv').config();
+const { describeError } = require('./net');
 const fs = require('fs');
 const path = require('path');
 const D = require('../../api/db');
@@ -32,7 +33,7 @@ const mask = (s) => s
     .select('ticket_id,agent_name,subject,resolved_at,status')
     .neq('review_source', 'claude').gte('resolved_date', from)
     .order('resolved_at', { ascending: true }).limit(LIMIT);
-  if (error) throw new Error(error.message);
+  if (error) throw new Error(`Supabase: ${error.message}${error.details ? ' | ' + error.details : ''}`);
   const tickets = [];
   for (const row of data || []) {
     try {
@@ -45,10 +46,10 @@ const mask = (s) => s
       tickets.push({ ticket_id: row.ticket_id, agent: row.agent_name, subject: mask(row.subject || ''),
         status: row.status === 5 ? 'closed' : 'resolved', resolved_at: row.resolved_at, messages: thread });
     } catch (e) {
-      console.error(`ticket ${row.ticket_id}: ${e.response?.status || ''} ${e.message} (skipped, retried next run)`);
+      console.error(`ticket ${row.ticket_id}: ${describeError(e)} (skipped, retried next run)`);
     }
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(path.join(OUT_DIR, 'pending.json'), JSON.stringify(tickets, null, 1));
   console.log(`pending: ${tickets.length}`);
-})().catch(e => { console.error('ERR', e.message); process.exit(1); });
+})().catch(e => { console.error('ERR', describeError(e)); process.exit(1); });

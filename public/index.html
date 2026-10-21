@@ -402,9 +402,15 @@ tr:hover td{background:rgba(255,255,255,.015)}
             <button class="btn" id="qBtnCsat" onclick="qView('csat')">⭐ CSAT</button>
           </div>
           <div class="switcher" style="gap:6px;flex-wrap:wrap">
-            <input type="date" id="qFrom" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
-            <span class="mono" style="color:var(--dim)">to</span>
-            <input type="date" id="qTo" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
+            <label class="mono" style="color:var(--dim)">Period:</label>
+            <select id="qPeriod" onchange="qPeriodChanged()">
+              <option value="month">Month</option>
+              <option value="range">Date range</option>
+            </select>
+            <input type="month" id="qMonth" class="q-month" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
+            <input type="date" id="qFrom" class="q-range hidden" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
+            <span class="mono q-range hidden" style="color:var(--dim)">to</span>
+            <input type="date" id="qTo" class="q-range hidden" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
             <label class="mono" style="color:var(--dim)">Agent:</label>
             <select id="qAgent" onchange="qRender()"><option value="">All agents</option></select>
             <button class="btn" onclick="qLoad()">↻ Load</button>
@@ -452,7 +458,9 @@ tr:hover td{background:rgba(255,255,255,.015)}
 
 <script>
 let token = localStorage.getItem('am_token') || null;
-let cfg = { threshold:30, pollMins:5 };
+let cfg = { threshold:30, pollMins:5, tz:'America/Los_Angeles' };
+// every time on the dashboard is shown in the server's DISPLAY_TZ, like the shift times
+const dashTZ = () => cfg.tz || 'America/Los_Angeles';
 let countdownTimer=null, nextAt=null;
 let cachedAgents = [];     // from /api/status (live)
 let dbAgents = [];         // from /api/agents (managed list)
@@ -507,7 +515,7 @@ async function loadStatus(){
     document.getElementById('sBreak').textContent=d.stats.onBreak;
     document.getElementById('sLate').textContent=d.stats.lateBreak;
     document.getElementById('sOff').textContent=d.stats.offShift;
-    document.getElementById('lastChk').textContent=d.lastChecked?'Checked '+new Date(d.lastChecked).toLocaleTimeString('en-US',{hour12:true}):'—';
+    document.getElementById('lastChk').textContent=d.lastChecked?'Checked '+new Date(d.lastChecked).toLocaleTimeString('en-US',{hour12:true,timeZone:dashTZ()}):'—';
     renderStatus(d.agents); renderStats(d.agents); renderBreaks(d.breakIssues);
     fillOverdueAgentDropdown(d.agents);
     firstStatusLoad=false;
@@ -557,7 +565,13 @@ function renderStatus(agents){
     else if(a.status==='alert')idleHtml=`<span class="idle-bad">${a.idleMinutes}m</span>`;
     else if(a.status==='idle')idleHtml=`<span class="idle-warn">${a.idleMinutes}m</span>`;
     else idleHtml=`<span class="idle-ok">${a.idleMinutes}m</span>`;
-    const last=a.lastSeen?new Date(a.lastSeen).toLocaleTimeString('en-US',{hour12:true,hour:'2-digit',minute:'2-digit'}):'—';
+    // last own reply/note; one from before the current shift isn't shown as shift activity
+    const lastFmt=(ts,withDay)=>new Date(ts).toLocaleString('en-US',{hour12:true,hour:'2-digit',minute:'2-digit',timeZone:dashTZ(),...(withDay?{month:'short',day:'numeric'}:{})});
+    const beforeShift=a.monitor&&a.shift&&(!a.lastSeen||a.lastSeen<a.shift.startTs);
+    const sameDay=a.lastSeen&&new Date(a.lastSeen).toLocaleDateString('en-US',{timeZone:dashTZ()})===new Date().toLocaleDateString('en-US',{timeZone:dashTZ()});
+    const last=beforeShift
+      ? `<span class="idle-bad">No activity this shift</span><div style="color:var(--dim);font-size:10px;margin-top:2px">${a.lastSeen?'last: '+lastFmt(a.lastSeen,!sameDay):'no recent reply'}</div>`
+      : a.lastSeen?lastFmt(a.lastSeen,!sameDay):'—';
     return `<tr><td><div class="ac"><div class="av">${esc(init)}</div><div><div class="an">${esc(a.name)}</div><div class="ae">${esc(a.email)}</div></div></div></td>
       <td><span class="badge ${bC}">${bL}</span></td><td class="mono">${shiftHtml}</td><td class="mono">${last}</td><td>${idleHtml}</td></tr>`;
   }).join('');
@@ -589,8 +603,8 @@ function renderBreaks(issues){
   const tb=document.getElementById('breaksBody');
   if(!issues?.length){tb.innerHTML='<tr><td colspan="4" class="empty">✓ No off-schedule breaks today</td></tr>';return;}
   tb.innerHTML=issues.map(i=>{
-    const sched=i.scheduled_start?new Date(i.scheduled_start).toLocaleTimeString('en-US',{hour12:true,hour:'2-digit',minute:'2-digit',timeZone:'America/Los_Angeles'}):'—';
-    const press=i.pressed_at?new Date(i.pressed_at).toLocaleTimeString('en-US',{hour12:true,hour:'2-digit',minute:'2-digit',timeZone:'America/Los_Angeles'}):'—';
+    const sched=i.scheduled_start?new Date(i.scheduled_start).toLocaleTimeString('en-US',{hour12:true,hour:'2-digit',minute:'2-digit',timeZone:dashTZ()}):'—';
+    const press=i.pressed_at?new Date(i.pressed_at).toLocaleTimeString('en-US',{hour12:true,hour:'2-digit',minute:'2-digit',timeZone:dashTZ()}):'—';
     const diff=i.late_min>0?`+${i.late_min}m late`:`${i.late_min}m early`;
     const color=i.late_min>0?'var(--orange)':'var(--info)';
     return `<tr><td><div class="an">${esc(i.agent_name||i.agent_email)}</div><div class="ae">${esc(i.agent_email)}</div></td>
@@ -619,7 +633,7 @@ async function loadOverdue(){
         :(t.sinceText&&t.sinceText.includes('day'))?`<span class="since-red">${esc(t.sinceText)}</span>`
         :`<span class="since-orange">${esc(t.sinceText||'')}</span>`;
       const replied=t.replied_at?`<span class="replied">✓ ${esc(t.repliedText)}</span>`:'<span class="empty-cell">— empty —</span>';
-      const due=t.response_due_at?new Date(t.response_due_at).toLocaleString('en-US',{hour12:true,month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—';
+      const due=t.response_due_at?new Date(t.response_due_at).toLocaleString('en-US',{hour12:true,month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:dashTZ()}):'—';
       return `<tr><td><a class="tkt-link" href="${esc(t.ticket_url)}" target="_blank">#${t.ticket_id}</a></td>
         <td>${esc((t.subject||'').slice(0,60))}</td><td class="mono">${due}</td><td>${since}</td><td>${replied}</td></tr>`;
     }).join('');
@@ -930,9 +944,25 @@ function dlTeamPdf(useRange, kind='team'){
 // QUALITY — Empathy and CSAT views share the date range and agent filter
 let qMode='empathy', qData={empathy:null, csat:null};
 function qOpen(){
-  const f=document.getElementById('qFrom'), t=document.getElementById('qTo');
-  if(!f.value||!t.value){ const loc=x=>new Date(x-x.getTimezoneOffset()*60000).toISOString().slice(0,10), now=new Date(); t.value=loc(now); f.value=loc(new Date(now-29*86400000)); }
+  const loc=x=>new Date(x-x.getTimezoneOffset()*60000).toISOString().slice(0,10), now=new Date();
+  const m=document.getElementById('qMonth'), f=document.getElementById('qFrom'), t=document.getElementById('qTo');
+  if(!m.value) m.value=loc(now).slice(0,7);   // current month
+  if(!f.value||!t.value){ t.value=loc(now); f.value=loc(new Date(now-29*86400000)); }
   if(!qData[qMode]) qLoad();
+}
+function qIsRange(){ return document.getElementById('qPeriod').value==='range'; }
+function qPeriodChanged(){
+  const range=qIsRange();
+  document.querySelectorAll('.q-range').forEach(el=>el.classList.toggle('hidden',!range));
+  document.querySelectorAll('.q-month').forEach(el=>el.classList.toggle('hidden',range));
+  qData={empathy:null, csat:null}; qLoad();
+}
+// from/to for the selected period; a month is its first to last day
+function qPeriod(){
+  if(qIsRange()) return { from:document.getElementById('qFrom').value, to:document.getElementById('qTo').value };
+  const m=document.getElementById('qMonth').value; if(!m) return { from:'', to:'' };
+  const [y,mo]=m.split('-').map(Number), last=new Date(Date.UTC(y,mo,0)).getUTCDate();
+  return { from:`${m}-01`, to:`${m}-${String(last).padStart(2,'0')}` };
 }
 function qView(m){
   qMode=m;
@@ -943,14 +973,15 @@ function qView(m){
   if(!qData[m]) qLoad(); else qRender();
 }
 async function qLoad(){
-  const from=document.getElementById('qFrom').value, to=document.getElementById('qTo').value;
-  if(!from||!to){ toast('Pick both dates','err'); return; }
+  const { from, to }=qPeriod();
+  if(!from||!to){ toast(qIsRange()?'Pick both dates':'Pick a month','err'); return; }
   if(from>to){ toast('From date must be on or before To date','err'); return; }
   const [sumId, listId, cols] = qMode==='empathy' ? ['qEmpSummary','qEmpFlagged',6] : ['qCsatSummary','qCsatNeg',6];
   document.getElementById(sumId).innerHTML=`<tr><td colspan="${cols}" class="empty">Loading…</td></tr>`;
   document.getElementById(listId).innerHTML='';
   try{
     const r=await authFetch(`/api/quality/${qMode}?from=${from}&to=${to}`); const d=await r.json(); if(!d.ok) throw new Error(d.error);
+    qData={empathy:null, csat:null};   // the other view reloads for this period when opened
     qData[qMode]=d;
     const sel=document.getElementById('qAgent'), keep=sel.value;
     sel.innerHTML='<option value="">All agents</option>'+d.agents.map(a=>`<option value="${esc(a.email)}">${esc(a.name)}</option>`).join('');
@@ -958,7 +989,7 @@ async function qLoad(){
     qRender();
   }catch(e){ document.getElementById(sumId).innerHTML=`<tr><td colspan="${cols}" class="empty">Error: ${esc(e.message)}</td></tr>`; }
 }
-function qWhen(iso){ return iso? new Date(iso).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—'; }
+function qWhen(iso){ return iso? new Date(iso).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:dashTZ()}) : '—'; }
 // escape, then highlight the matched cue so each flag shows why it fired
 function qMark(text,cue){ const t=esc(text), c=esc(cue||''); if(!c) return t; const i=t.toLowerCase().indexOf(c.toLowerCase()); return i<0?t:t.slice(0,i)+`<b style="color:var(--danger)">${t.slice(i,i+c.length)}</b>`+t.slice(i+c.length); }
 function qRender(){
@@ -1037,7 +1068,7 @@ function scheduleCountdown(){
 function resetCountdown(){if(countdownTimer)clearInterval(countdownTimer);scheduleCountdown();}
 
 // HELPERS
-function fmtTs(ts){return new Date(ts).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:'America/Los_Angeles'});}
+function fmtTs(ts){return new Date(ts).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:dashTZ()});}
 function showErr(m){const e=document.getElementById('errBanner');e.textContent='⚠ '+m;e.style.display='block';}
 function hideErr(){document.getElementById('errBanner').style.display='none';}
 function toast(m,t='ok'){const el=document.getElementById('toast');el.textContent=m;el.className='show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.className=t;},3500);}

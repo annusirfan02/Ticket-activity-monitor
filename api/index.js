@@ -440,7 +440,7 @@ async function runPoll() {
 
   const metrics = {};
   for (const a of agents) metrics[id2email[a.id]] = {
-    lastSeen:0, newTickets:0, resolved:0, closed:0,
+    lastSeen:0, ticketSeen:0, newTickets:0, resolved:0, closed:0,
     respSum:0, respCount:0, frSum:0, frCount:0, responseDue:0, slaDue:0, slaBreached:0, custom:{},
   };
 
@@ -494,7 +494,8 @@ async function runPoll() {
 
     const upd = new Date(t.updated_at).getTime();
     const cre = new Date(t.created_at).getTime();
-    if (upd > m.lastSeen) m.lastSeen = upd;
+    // fallback only: used when the agent-activity tables aren't set up
+    if (upd > m.ticketSeen) m.ticketSeen = upd;
     if (cre >= winStart) { m.newTickets++; g.newTickets++; }
 
     const label = (statusChoices?.[t.status] || '').toString().toLowerCase();
@@ -563,6 +564,12 @@ async function runPoll() {
       }
     }
   }
+
+  // Last activity = the agent's own latest reply/note on any ticket.
+  let activity = null;
+  try { activity = await scanAgentActivity(tickets, id2email); }
+  catch (e) { console.error('agent activity:', e.message); }
+  for (const email of Object.keys(metrics)) metrics[email].lastSeen = activity ? (activity[email] || 0) : metrics[email].ticketSeen;
 
   // Apply overdue-log changes in parallel (only the rows that actually changed).
   await Promise.all([
@@ -766,6 +773,50 @@ async function runPoll() {
 
   mem.lastChecked = new Date().toISOString();
   return { agents: results, empathyCandidates };
+}
+
+// ── AGENT ACTIVITY: the agent's own replies and notes, on any ticket ──
+// A ticket's updated_at changes for customer replies and automations too, so
+// it can't tell when the agent last worked. Instead, each poll reads the
+// conversations of tickets that changed since they were last scanned and keeps
+// each tracked agent's latest reply/note. Newest tickets first, at most
+// ACTIVITY_MAX_PER_POLL per poll, stopping when the Freshdesk rate limit runs
+// low; the rest are picked up next poll. Returns email -> last activity (ms),
+// or null when the tables aren't set up (the caller then falls back).
+const ACTIVITY_MAX_PER_POLL = 20, ACTIVITY_MIN_RATE_LEFT = 150;
+async function scanAgentActivity(tickets, id2email) {
+  let scanned;
+  try { scanned = await D.getTicketScans(tickets.map(t => t.id)); }
+  catch (e) { if (/schema cache/.test(e.message)) return null; throw e; }
+  const changed = tickets.filter(t => scanned[t.id] !== Date.parse(t.updated_at))
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
+    .slice(0, ACTIVITY_MAX_PER_POLL);
+  const latest = {}, scans = [];
+  for (let i = 0; i < changed.length; i += 5) {
+    const batch = await Promise.all(changed.slice(i, i + 5).map(t =>
+      axios.get(`${fdBase()}/tickets/${t.id}/conversations?per_page=100`, { headers: fdHeaders(), timeout: 15000 })
+        .then(r => ({ t, convs: r.data || [], left: parseInt(r.headers['x-ratelimit-remaining'] ?? '9999') }))
+        .catch(err => ({ t, err }))));
+    let low = false;
+    for (const { t, convs, left, err } of batch) {
+      if (err) { if (err.response?.status === 429) low = true; continue; }   // retried next poll
+      for (const c of convs) {
+        const email = !c.incoming && id2email[c.user_id];
+        if (!email) continue;
+        const at = Date.parse(c.created_at);
+        if (!latest[email] || at > latest[email].at) latest[email] = { at, ticketId: t.id, kind: c.private ? 'note' : 'reply' };
+      }
+      scans.push({ ticket_id: t.id, updated_at: t.updated_at, scanned_at: new Date().toISOString() });
+      if (left < ACTIVITY_MIN_RATE_LEFT) low = true;
+    }
+    if (low) break;
+  }
+  const current = await D.getAgentActivity();
+  const newer = Object.entries(latest).filter(([email, v]) => !(current[email] >= v.at))
+    .map(([email, v]) => ({ agent_email: email, last_at: new Date(v.at).toISOString(), ticket_id: v.ticketId, kind: v.kind, updated_at: new Date().toISOString() }));
+  if (newer.length) { await D.upsertAgentActivity(newer); newer.forEach(r => current[r.agent_email] = Date.parse(r.last_at)); }
+  if (scans.length) await D.upsertTicketScans(scans);
+  return current;
 }
 
 // ── EMPATHY CHECK (resolved/closed tickets; rule in api/empathy.js) ──
@@ -1214,7 +1265,7 @@ app.get('/api/idle-log', authMw, async (req,res)=>{
   } catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
-app.get('/api/config', (req,res)=>res.json({ threshold:THRESHOLD_MIN, pollMins:POLL_MIN }));
+app.get('/api/config', (req,res)=>res.json({ threshold:THRESHOLD_MIN, pollMins:POLL_MIN, tz:TZ }));
 
 app.post('/api/cron', async (req,res)=>{
   if (process.env.CRON_SECRET && req.headers['x-cron-secret']!==process.env.CRON_SECRET) return res.status(401).json({ok:false});

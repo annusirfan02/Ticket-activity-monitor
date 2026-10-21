@@ -219,6 +219,22 @@ create table if not exists empathy_checks (
 create index if not exists idx_empathy_date  on empathy_checks(resolved_date);
 create index if not exists idx_empathy_agent on empathy_checks(agent_email);
 
+-- ── Agent activity: latest own reply/note per agent, on any ticket ──
+-- ticket_scan remembers which ticket version was already read, so each
+-- ticket's conversations are fetched only after it changes.
+create table if not exists ticket_scan (
+  ticket_id       bigint primary key,
+  updated_at      timestamptz,          -- ticket updated_at when last read
+  scanned_at      timestamptz default now()
+);
+create table if not exists agent_last_activity (
+  agent_email     text primary key,
+  last_at         timestamptz not null, -- agent's latest reply or private note
+  ticket_id       bigint,
+  kind            text,                 -- 'reply' | 'note'
+  updated_at      timestamptz default now()
+);
+
 create index if not exists idx_late_email   on late_shifts(agent_email);
 create index if not exists idx_late_month    on late_shifts(month_key);
 create index if not exists idx_sla_email      on sla_daily(agent_email);

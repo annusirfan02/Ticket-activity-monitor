@@ -314,6 +314,33 @@ async function getMissedShiftsRange(fromDate, toDate) {
   return data || [];
 }
 
+// ── AGENT ACTIVITY (own replies/notes) ──
+// ticket_id -> updated_at (ms) at the time its conversations were last read
+async function getTicketScans(ticketIds) {
+  const out = {};
+  for (let i = 0; i < ticketIds.length; i += 200) {
+    const { data, error } = await db().from('ticket_scan').select('ticket_id,updated_at').in('ticket_id', ticketIds.slice(i, i + 200));
+    if (error) throw new Error('getTicketScans: ' + error.message);
+    for (const r of data || []) out[r.ticket_id] = Date.parse(r.updated_at);
+  }
+  return out;
+}
+async function upsertTicketScans(rows) {
+  const { error } = await db().from('ticket_scan').upsert(rows, { onConflict: 'ticket_id' });
+  if (error) throw new Error('upsertTicketScans: ' + error.message);
+}
+// agent_email -> latest own reply/note (ms)
+async function getAgentActivity() {
+  const { data, error } = await db().from('agent_last_activity').select('agent_email,last_at');
+  if (error) throw new Error('getAgentActivity: ' + error.message);
+  const out = {}; for (const r of data || []) out[r.agent_email] = Date.parse(r.last_at);
+  return out;
+}
+async function upsertAgentActivity(rows) {
+  const { error } = await db().from('agent_last_activity').upsert(rows, { onConflict: 'agent_email' });
+  if (error) throw new Error('upsertAgentActivity: ' + error.message);
+}
+
 // ── EMPATHY CHECKS (one row per resolved/closed ticket) ──
 // ticket_id -> resolved_at (ms) for the given tickets, to skip ones already checked.
 async function getEmpathyResolvedAt(ticketIds) {
@@ -411,6 +438,7 @@ module.exports = {
   replaceGroupStats, getGroupStatsRange,
   upsertMissedShift, deleteMissedShift, getMissedShiftsRange,
   getEmpathyResolvedAt, upsertEmpathyCheck, getEmpathyRange,
+  getTicketScans, upsertTicketScans, getAgentActivity, upsertAgentActivity,
   getThresholds, setThreshold,
   saveReport, getReports, getReportMonths,
 };

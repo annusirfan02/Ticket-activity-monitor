@@ -199,6 +199,26 @@ create table if not exists missed_shifts (
 );
 create index if not exists idx_missed_date on missed_shifts(log_date);
 
+-- ── Empathy check for resolved/closed tickets (rule-based, see api/empathy.js) ──
+-- One row per ticket; re-checked if the ticket is resolved again later.
+create table if not exists empathy_checks (
+  ticket_id       bigint primary key,
+  agent_email     text not null,        -- ticket's assigned agent
+  agent_name      text,
+  subject         text,
+  ticket_url      text,
+  status          integer,              -- 4 resolved, 5 closed
+  resolved_at     timestamptz,
+  resolved_date   date,                 -- in DISPLAY_TZ, for date-range filters
+  frustrated      integer default 0,    -- customer messages showing frustration
+  acknowledged    integer default 0,    -- ...answered with an empathy phrase
+  missing         integer default 0,    -- ...answered without one
+  findings        jsonb default '[]',   -- [{cue, excerpt, customer_at, reply_at, reply_excerpt}]
+  checked_at      timestamptz default now()
+);
+create index if not exists idx_empathy_date  on empathy_checks(resolved_date);
+create index if not exists idx_empathy_agent on empathy_checks(agent_email);
+
 create index if not exists idx_late_email   on late_shifts(agent_email);
 create index if not exists idx_late_month    on late_shifts(month_key);
 create index if not exists idx_sla_email      on sla_daily(agent_email);

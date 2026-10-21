@@ -202,6 +202,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
       <div class="tab" data-tab="statuses" onclick="switchTab('statuses')">Manage Statuses</div>
       <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
       <div class="tab" data-tab="reports" onclick="switchTab('reports')">Reports</div>
+      <div class="tab" data-tab="quality" onclick="switchTab('quality')">Quality</div>
     </div>
 
     <!-- STATUS -->
@@ -389,6 +390,58 @@ tr:hover td{background:rgba(255,255,255,.015)}
           <thead><tr><th>Metric</th><th>Green ≤</th><th>Yellow ≤</th><th></th></tr></thead>
           <tbody id="threshBody"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
         </table></div>
+      </div>
+    </div>
+
+    <!-- QUALITY: Empathy (rule-based, resolved/closed tickets) and CSAT, kept separate -->
+    <div id="tab-quality" class="hidden">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="switcher" style="gap:6px">
+            <button class="btn primary" id="qBtnEmpathy" onclick="qView('empathy')">💬 Empathy</button>
+            <button class="btn" id="qBtnCsat" onclick="qView('csat')">⭐ CSAT</button>
+          </div>
+          <div class="switcher" style="gap:6px;flex-wrap:wrap">
+            <input type="date" id="qFrom" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
+            <span class="mono" style="color:var(--dim)">to</span>
+            <input type="date" id="qTo" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
+            <label class="mono" style="color:var(--dim)">Agent:</label>
+            <select id="qAgent" onchange="qRender()"><option value="">All agents</option></select>
+            <button class="btn" onclick="qLoad()">↻ Load</button>
+          </div>
+        </div>
+
+        <div id="qEmpathy">
+          <div class="mono" style="color:var(--dim);font-size:11px;padding:10px 18px;line-height:1.6">
+            Resolved and closed tickets only. A ticket is flagged when a customer message shows frustration
+            (e.g. "still not working", "ASAP", "frustrated", "no response", "!!") and the next agent reply has no acknowledgement
+            (e.g. "sorry", "I understand", "thank you for your patience"). No AI is used — the matched words are shown for each flag.
+          </div>
+          <div class="tbl-scroll"><table>
+            <thead><tr><th>Agent</th><th>Tickets checked</th><th>With frustration</th><th>Acknowledged</th><th>Empathy missing</th><th>Missing rate</th></tr></thead>
+            <tbody id="qEmpSummary"><tr><td colspan="6" class="empty">Pick dates and click Load</td></tr></tbody>
+          </table></div>
+          <div class="panel-title" style="padding:16px 18px 6px">Flagged tickets</div>
+          <div class="tbl-scroll"><table>
+            <thead><tr><th>Ticket</th><th>Agent</th><th>Resolved</th><th>Customer said</th><th>Agent replied</th></tr></thead>
+            <tbody id="qEmpFlagged"><tr><td colspan="5" class="empty">—</td></tr></tbody>
+          </table></div>
+        </div>
+
+        <div id="qCsat" class="hidden">
+          <div class="mono" style="color:var(--dim);font-size:11px;padding:10px 18px;line-height:1.6">
+            Customer satisfaction survey ratings from Freshdesk, read live. CSAT % = positive ÷ all ratings.
+          </div>
+          <div class="tbl-scroll"><table>
+            <thead><tr><th>Agent</th><th>Ratings</th><th>Positive</th><th>Neutral</th><th>Negative</th><th>CSAT %</th></tr></thead>
+            <tbody id="qCsatSummary"><tr><td colspan="6" class="empty">Pick dates and click Load</td></tr></tbody>
+          </table></div>
+          <div class="panel-title" style="padding:16px 18px 6px">Negative ratings</div>
+          <div class="tbl-scroll"><table>
+            <thead><tr><th>Ticket</th><th>Agent</th><th>Rated</th><th>Customer feedback</th></tr></thead>
+            <tbody id="qCsatNeg"><tr><td colspan="4" class="empty">—</td></tr></tbody>
+          </table></div>
+        </div>
       </div>
     </div>
 
@@ -715,7 +768,8 @@ function clearFilter(){ statFilter='all'; document.getElementById('filterBanner'
 // TABS
 function switchTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.dataset.tab===t));
-  ['status','stats','overdue','breaks','agents','statuses','history','reports'].forEach(n=>document.getElementById('tab-'+n).classList.toggle('hidden',n!==t));
+  ['status','stats','overdue','breaks','agents','statuses','history','reports','quality'].forEach(n=>document.getElementById('tab-'+n).classList.toggle('hidden',n!==t));
+  if(t==='quality') qOpen();
   if(t==='overdue')loadOverdue();
   if(t==='breaks'){ const di=document.getElementById('idleDate'); if(di&&!di.value)di.value=new Date().toISOString().split('T')[0]; fillIdleAgentDropdown(); loadIdle(); }
   if(t==='agents')loadAgents();
@@ -872,6 +926,74 @@ function dlTeamPdf(useRange, kind='team'){
   a.setAttribute('href',`/api/reports/${kind}-pdf?`+qs); a.dataset.filename=`${kind}-report-${label}.pdf`;
   toast(`Preparing ${kind} PDF…`,'ok');
   return dlPdf(new Event('click'), a);
+}
+// QUALITY — Empathy and CSAT views share the date range and agent filter
+let qMode='empathy', qData={empathy:null, csat:null};
+function qOpen(){
+  const f=document.getElementById('qFrom'), t=document.getElementById('qTo');
+  if(!f.value||!t.value){ const loc=x=>new Date(x-x.getTimezoneOffset()*60000).toISOString().slice(0,10), now=new Date(); t.value=loc(now); f.value=loc(new Date(now-29*86400000)); }
+  if(!qData[qMode]) qLoad();
+}
+function qView(m){
+  qMode=m;
+  document.getElementById('qBtnEmpathy').classList.toggle('primary',m==='empathy');
+  document.getElementById('qBtnCsat').classList.toggle('primary',m==='csat');
+  document.getElementById('qEmpathy').classList.toggle('hidden',m!=='empathy');
+  document.getElementById('qCsat').classList.toggle('hidden',m!=='csat');
+  if(!qData[m]) qLoad(); else qRender();
+}
+async function qLoad(){
+  const from=document.getElementById('qFrom').value, to=document.getElementById('qTo').value;
+  if(!from||!to){ toast('Pick both dates','err'); return; }
+  if(from>to){ toast('From date must be on or before To date','err'); return; }
+  const [sumId, listId, cols] = qMode==='empathy' ? ['qEmpSummary','qEmpFlagged',6] : ['qCsatSummary','qCsatNeg',6];
+  document.getElementById(sumId).innerHTML=`<tr><td colspan="${cols}" class="empty">Loading…</td></tr>`;
+  document.getElementById(listId).innerHTML='';
+  try{
+    const r=await authFetch(`/api/quality/${qMode}?from=${from}&to=${to}`); const d=await r.json(); if(!d.ok) throw new Error(d.error);
+    qData[qMode]=d;
+    const sel=document.getElementById('qAgent'), keep=sel.value;
+    sel.innerHTML='<option value="">All agents</option>'+d.agents.map(a=>`<option value="${esc(a.email)}">${esc(a.name)}</option>`).join('');
+    sel.value=d.agents.some(a=>a.email===keep)?keep:'';
+    qRender();
+  }catch(e){ document.getElementById(sumId).innerHTML=`<tr><td colspan="${cols}" class="empty">Error: ${esc(e.message)}</td></tr>`; }
+}
+function qWhen(iso){ return iso? new Date(iso).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—'; }
+// escape, then highlight the matched cue so each flag shows why it fired
+function qMark(text,cue){ const t=esc(text), c=esc(cue||''); if(!c) return t; const i=t.toLowerCase().indexOf(c.toLowerCase()); return i<0?t:t.slice(0,i)+`<b style="color:var(--danger)">${t.slice(i,i+c.length)}</b>`+t.slice(i+c.length); }
+function qRender(){
+  const d=qData[qMode]; if(!d) return;
+  const who=document.getElementById('qAgent').value, mine=x=>!who||x.email===who;
+  const red=(n,txt)=>n?`<span class="num" style="color:var(--danger)">${txt}</span>`:`<span class="num">${txt}</span>`;
+  const person=a=>`<td><div class="an">${esc(a.name)}</div><div class="ae">${esc(a.email)}</div></td>`;
+  if(qMode==='empathy'){
+    const rows=d.agents.filter(mine);
+    document.getElementById('qEmpSummary').innerHTML = rows.length ? rows.map(a=>`<tr>${person(a)}
+      <td><span class="num">${a.checked}</span></td><td><span class="num">${a.frustrated}</span></td>
+      <td><span class="num g">${a.acknowledged}</span></td><td>${red(a.flagged,a.flagged)}</td>
+      <td>${a.frustrated?red(a.flagged,a.flaggedPct+'%'):'<span class="empty-cell">–</span>'}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="empty">No agents</td></tr>';
+    const list=d.flagged.filter(mine);
+    document.getElementById('qEmpFlagged').innerHTML = list.length ? list.map(t=>`<tr>
+      <td><a class="tkt-link" href="${esc(t.url)}" target="_blank" rel="noopener">#${t.ticketId}</a><div class="ae">${esc(t.subject)}</div></td>
+      <td>${esc(t.name)}</td><td class="mono">${qWhen(t.resolvedAt)}</td>
+      <td>${t.findings.map(f=>`<div style="margin-bottom:6px">${qMark(f.excerpt,f.cue)}<div class="ae">${qWhen(f.customer_at)}</div></div>`).join('')}</td>
+      <td>${t.findings.map(f=>`<div style="margin-bottom:6px">${esc(f.reply_excerpt)}<div class="ae">${qWhen(f.reply_at)}</div></div>`).join('')}</td></tr>`).join('')
+      : `<tr><td colspan="5" class="empty">No flagged tickets${d.checked?'':' — none checked in this period yet (checks run with each poll)'}</td></tr>`;
+  } else {
+    const rows=d.agents.filter(mine);
+    document.getElementById('qCsatSummary').innerHTML = rows.length ? rows.map(a=>`<tr>${person(a)}
+      <td><span class="num">${a.total}</span></td><td><span class="num g">${a.positive}</span></td>
+      <td><span class="num">${a.neutral}</span></td><td>${red(a.negative,a.negative)}</td>
+      <td>${a.csatPct==null?'<span class="empty-cell">–</span>':`<span class="num" style="color:${a.csatPct>=90?'var(--accent)':a.csatPct>=75?'var(--warn)':'var(--danger)'}">${a.csatPct}%</span>`}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="empty">No agents</td></tr>';
+    const list=d.negatives.filter(mine);
+    document.getElementById('qCsatNeg').innerHTML = list.length ? list.map(n=>`<tr>
+      <td><a class="tkt-link" href="${esc(n.url)}" target="_blank" rel="noopener">#${n.ticketId}</a></td>
+      <td>${esc(n.name)}</td><td class="mono">${qWhen(n.createdAt)}</td>
+      <td>${n.feedback?esc(n.feedback):'<span class="empty-cell">no comment</span>'}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="empty">No negative ratings</td></tr>';
+  }
 }
 // PDF download needs auth header → fetch as blob
 async function dlPdf(ev, el){

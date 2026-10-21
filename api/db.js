@@ -314,6 +314,33 @@ async function getMissedShiftsRange(fromDate, toDate) {
   return data || [];
 }
 
+// ── EMPATHY CHECKS (one row per resolved/closed ticket) ──
+// ticket_id -> resolved_at (ms) for the given tickets, to skip ones already checked.
+async function getEmpathyResolvedAt(ticketIds) {
+  const out = {};
+  for (let i = 0; i < ticketIds.length; i += 200) {
+    const { data, error } = await db().from('empathy_checks').select('ticket_id,resolved_at').in('ticket_id', ticketIds.slice(i, i + 200));
+    if (error) throw new Error('getEmpathyResolvedAt: ' + error.message);
+    for (const r of data || []) out[r.ticket_id] = Date.parse(r.resolved_at);
+  }
+  return out;
+}
+async function upsertEmpathyCheck(row) {
+  const { error } = await db().from('empathy_checks').upsert(row, { onConflict: 'ticket_id' });
+  if (error) throw new Error('upsertEmpathyCheck: ' + error.message);
+}
+async function getEmpathyRange(fromDate, toDate) {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await db().from('empathy_checks').select('*')
+      .gte('resolved_date', fromDate).lte('resolved_date', toDate).order('resolved_at', { ascending: false }).range(from, from + 999);
+    if (error) throw new Error('getEmpathyRange: ' + error.message);
+    all.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return all;
+}
+
 // ── GROUP DAILY STATS (per agent × ticket group × day) ──
 // Replaces an agent's rows for one stat_date: upserts the groups present now and
 // drops groups that no longer have tickets (e.g. a ticket moved to another group).
@@ -383,6 +410,7 @@ module.exports = {
   upsertSlaDaily, getSlaRange,
   replaceGroupStats, getGroupStatsRange,
   upsertMissedShift, deleteMissedShift, getMissedShiftsRange,
+  getEmpathyResolvedAt, upsertEmpathyCheck, getEmpathyRange,
   getThresholds, setThreshold,
   saveReport, getReports, getReportMonths,
 };

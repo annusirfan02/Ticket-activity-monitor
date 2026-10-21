@@ -8,6 +8,7 @@ const crypto  = require('crypto');
 const D        = require('./db');
 const R        = require('./report');
 const A        = require('./attendance');
+const E        = require('./empathy');
 
 const app = express();
 app.use(express.json());
@@ -478,6 +479,7 @@ async function runPoll() {
     } catch (e) { console.warn('[FD] excluded purge:', e.message); }
   }
 
+  const empathyCandidates = [];
   for (const t of tickets) {
     if (excludedIds.has(t.status) || hasExcludedTag(t)) {
       if (existingOverdue.has(t.id)) overdueOps.del.push(t.id);
@@ -498,6 +500,11 @@ async function runPoll() {
     const label = (statusChoices?.[t.status] || '').toString().toLowerCase();
     if ((t.status===4 || label.includes('resolved')) && upd>=winStart) { m.resolved++; g.resolved++; }
     if ((t.status===5 || label.includes('closed'))   && upd>=winStart) { m.closed++; g.closed++; }
+    // resolved/closed tickets are handed to the empathy check (run from /api/cron)
+    if (t.status === 4 || t.status === 5) empathyCandidates.push({
+      id: t.id, email, name: email2name[email] || email, subject: t.subject, status: t.status,
+      resolvedAt: t.stats?.resolved_at || t.stats?.closed_at || t.updated_at,
+    });
 
     for (const s of trackedStatuses) {
       if (CORE_STATUS_IDS.has(s.choice_id)) continue;       // Resolved/Closed have columns
@@ -758,7 +765,64 @@ async function runPoll() {
   }
 
   mem.lastChecked = new Date().toISOString();
-  return { agents: results };
+  return { agents: results, empathyCandidates };
+}
+
+// ── EMPATHY CHECK (resolved/closed tickets; rule in api/empathy.js) ──
+// Runs after the cron poll. Each ticket costs a Freshdesk call, so a run checks
+// at most EMPATHY_MAX_PER_RUN tickets, stops early when the shared rate limit
+// runs low or the time budget is used, and the rest are picked up next run.
+// A ticket is re-checked only if its resolution time changed (reopened).
+const EMPATHY_MAX_PER_RUN = 15, EMPATHY_MIN_RATE_LEFT = 150;
+async function fdTicketMessages(id) {
+  const r = await axios.get(`${fdBase()}/tickets/${id}?include=conversations`, { headers: fdHeaders() });
+  let remaining = parseInt(r.headers['x-ratelimit-remaining'] ?? '9999');
+  let convs = r.data.conversations || [];
+  if (convs.length >= 10) {   // include= returns only the first 10
+    convs = [];
+    for (let page = 1; page <= 5; page++) {
+      const p = await axios.get(`${fdBase()}/tickets/${id}/conversations?per_page=100&page=${page}`, { headers: fdHeaders() });
+      remaining = parseInt(p.headers['x-ratelimit-remaining'] ?? '9999');
+      convs = convs.concat(p.data || []);
+      if (!p.data || p.data.length < 100) break;
+    }
+  }
+  const t = r.data;
+  const messages = [
+    // the description is the customer's first message, except on outbound emails (source 10)
+    { incoming: t.source !== 10, private: false, text: t.description_text, at: t.created_at },
+    ...convs.map(c => ({ incoming: !!c.incoming, private: !!c.private, text: c.body_text, at: c.created_at })),
+  ];
+  return { messages, remaining };
+}
+async function runEmpathyChecks(candidates, budgetMs = 8000) {
+  if (!candidates?.length) return { checked: 0, pending: 0 };
+  const t0 = Date.now();
+  let done;
+  try { done = await D.getEmpathyResolvedAt(candidates.map(c => c.id)); }
+  catch (e) { if (/schema cache/.test(e.message)) return { skipped: 'empathy_checks table missing' }; throw e; }
+  const todo = candidates.filter(c => done[c.id] !== Date.parse(c.resolvedAt));
+  let checked = 0;
+  for (const c of todo.slice(0, EMPATHY_MAX_PER_RUN)) {
+    if (Date.now() - t0 > budgetMs) break;
+    try {
+      const { messages, remaining } = await fdTicketMessages(c.id);
+      const r = E.analyzeConversation(messages);
+      await D.upsertEmpathyCheck({
+        ticket_id: c.id, agent_email: c.email, agent_name: c.name, subject: (c.subject || '').slice(0, 250),
+        ticket_url: ticketUrl(c.id), status: c.status,
+        resolved_at: new Date(c.resolvedAt).toISOString(), resolved_date: A.shiftDate(Date.parse(c.resolvedAt)),
+        frustrated: r.frustrated, acknowledged: r.acknowledged, missing: r.missing, findings: r.findings,
+        checked_at: new Date().toISOString(),
+      });
+      checked++;
+      if (remaining < EMPATHY_MIN_RATE_LEFT) break;
+    } catch (e) {
+      if (e.response?.status === 429) break;   // rate limited: try again next run
+      console.warn('[empathy]', c.id, e.message);
+    }
+  }
+  return { checked, pending: todo.length - checked };
 }
 
 // ── AUTH ──
@@ -1038,6 +1102,82 @@ app.get('/api/reports/group-pdf', authMw, async (req,res)=>{
   }
 });
 
+// ── QUALITY TAB ──
+// Both views take ?from=YYYY-MM-DD&to=YYYY-MM-DD (dates in DISPLAY_TZ).
+function qualityRange(q) {
+  const r = parseRange(q);
+  if (!r) return { error:'from and to required' };
+  return r;
+}
+const agentNames = async () => { const m = {}; (await D.getAgents()).forEach(a => m[a.email.toLowerCase()] = a.name || a.email); return m; };
+
+// Empathy: summary per agent + flagged tickets (from empathy_checks)
+app.get('/api/quality/empathy', authMw, async (req,res)=>{
+  try {
+    const range = qualityRange(req.query);
+    if (range.error) return res.status(400).json({ok:false,error:range.error});
+    const [rows, names] = await Promise.all([D.getEmpathyRange(range.from, range.to), agentNames()]);
+    const by = {};
+    for (const email of Object.keys(names)) by[email] = { email, name:names[email], checked:0, frustrated:0, acknowledged:0, flagged:0 };
+    for (const r of rows) {
+      const s = by[r.agent_email] = by[r.agent_email] || { email:r.agent_email, name:r.agent_name || r.agent_email, checked:0, frustrated:0, acknowledged:0, flagged:0 };
+      s.checked++;
+      if (r.frustrated) s.frustrated++;
+      if (r.frustrated && !r.missing) s.acknowledged++;
+      if (r.missing) s.flagged++;
+    }
+    const agents = Object.values(by).map(s => ({ ...s, flaggedPct: s.frustrated ? +((s.flagged / s.frustrated) * 100).toFixed(1) : 0 }))
+      .sort((a, b) => b.flagged - a.flagged || b.checked - a.checked || a.name.localeCompare(b.name));
+    const flagged = rows.filter(r => r.missing).map(r => ({
+      ticketId:r.ticket_id, url:r.ticket_url, subject:r.subject, email:r.agent_email, name:r.agent_name,
+      status:r.status, resolvedAt:r.resolved_at, missing:r.missing, frustrated:r.frustrated, findings:r.findings || [],
+    }));
+    res.json({ ok:true, from:range.from, to:range.to, checked:rows.length, agents, flagged });
+  } catch(e){
+    if (/empathy_checks/.test(e.message) && /schema cache/.test(e.message))
+      return res.status(503).json({ok:false,error:'Empathy table is not set up yet — run the empathy_checks SQL from db/schema.sql in Supabase'});
+    res.status(500).json({ok:false,error:e.message});
+  }
+});
+
+// CSAT: Freshdesk satisfaction ratings, read live. Freshdesk scores: 101–103
+// positive, 100 neutral, -101…-103 negative (the scale depends on the survey).
+const csatTone = (v) => v > 100 ? 'positive' : v === 100 ? 'neutral' : v < 0 ? 'negative' : 'neutral';
+app.get('/api/quality/csat', authMw, async (req,res)=>{
+  try {
+    const range = qualityRange(req.query);
+    if (range.error) return res.status(400).json({ok:false,error:range.error});
+    // a day of margin either side; exact filtering is by date in DISPLAY_TZ below
+    const since = new Date(Date.parse(range.from + 'T00:00:00Z') - 86400000).toISOString();
+    const ratings = [];
+    for (let page = 1; page <= 30; page++) {
+      const { data } = await axios.get(`${fdBase()}/surveys/satisfaction_ratings?created_since=${since}&per_page=100&page=${page}`, { headers: fdHeaders() });
+      ratings.push(...(data || []));
+      if (!data || data.length < 100) break;
+    }
+    const [fdList, names] = await Promise.all([fdAgents(), agentNames()]);
+    const id2email = {}; fdList.forEach(a => id2email[a.id] = (a.contact?.email || '').toLowerCase().trim());
+    const by = {};
+    for (const email of Object.keys(names)) by[email] = { email, name:names[email], total:0, positive:0, neutral:0, negative:0 };
+    const negatives = [];
+    let other = 0;
+    for (const r of ratings) {
+      const day = A.shiftDate(Date.parse(r.created_at));
+      if (day < range.from || day > range.to) continue;
+      const email = id2email[r.agent_id];
+      if (!email || !by[email]) { other++; continue; }   // agent not tracked
+      const tone = csatTone(+(r.ratings?.default_question));
+      by[email].total++; by[email][tone]++;
+      if (tone === 'negative') negatives.push({ ticketId:r.ticket_id, url:ticketUrl(r.ticket_id), email, name:names[email],
+        createdAt:r.created_at, feedback:r.feedback || '' });
+    }
+    const agents = Object.values(by).map(s => ({ ...s, csatPct: s.total ? +((s.positive / s.total) * 100).toFixed(1) : null }))
+      .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+    negatives.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    res.json({ ok:true, from:range.from, to:range.to, agents, negatives, otherAgents:other });
+  } catch(e){ console.error('csat:', e.message); res.status(500).json({ok:false,error:e.message}); }
+});
+
 // ── THRESHOLDS ──
 app.get('/api/thresholds', authMw, async (req,res)=>{
   try {
@@ -1095,7 +1235,10 @@ app.post('/api/cron', async (req,res)=>{
         }
       } catch (e) { console.error('auto report:', e.message); }
     }
-    res.json({ok:true, checked:r.agents.length, reportGen});
+    let empathy = null;
+    try { empathy = await runEmpathyChecks(r.empathyCandidates); }
+    catch (e) { console.error('empathy:', e.message); }
+    res.json({ok:true, checked:r.agents.length, reportGen, empathy});
   }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });

@@ -9,6 +9,7 @@ const D        = require('./db');
 const R        = require('./report');
 const A        = require('./attendance');
 const E        = require('./empathy');
+const T        = require('./ticket-thread');
 
 const app = express();
 app.use(express.json());
@@ -825,27 +826,6 @@ async function scanAgentActivity(tickets, id2email) {
 // runs low or the time budget is used, and the rest are picked up next run.
 // A ticket is re-checked only if its resolution time changed (reopened).
 const EMPATHY_MAX_PER_RUN = 15, EMPATHY_MIN_RATE_LEFT = 150;
-async function fdTicketMessages(id) {
-  const r = await axios.get(`${fdBase()}/tickets/${id}?include=conversations`, { headers: fdHeaders() });
-  let remaining = parseInt(r.headers['x-ratelimit-remaining'] ?? '9999');
-  let convs = r.data.conversations || [];
-  if (convs.length >= 10) {   // include= returns only the first 10
-    convs = [];
-    for (let page = 1; page <= 5; page++) {
-      const p = await axios.get(`${fdBase()}/tickets/${id}/conversations?per_page=100&page=${page}`, { headers: fdHeaders() });
-      remaining = parseInt(p.headers['x-ratelimit-remaining'] ?? '9999');
-      convs = convs.concat(p.data || []);
-      if (!p.data || p.data.length < 100) break;
-    }
-  }
-  const t = r.data;
-  const messages = [
-    // the description is the customer's first message, except on outbound emails (source 10)
-    { incoming: t.source !== 10, private: false, text: t.description_text, at: t.created_at },
-    ...convs.map(c => ({ incoming: !!c.incoming, private: !!c.private, text: c.body_text, at: c.created_at })),
-  ];
-  return { messages, remaining };
-}
 async function runEmpathyChecks(candidates, budgetMs = 8000) {
   if (!candidates?.length) return { checked: 0, pending: 0 };
   const t0 = Date.now();
@@ -857,7 +837,7 @@ async function runEmpathyChecks(candidates, budgetMs = 8000) {
   for (const c of todo.slice(0, EMPATHY_MAX_PER_RUN)) {
     if (Date.now() - t0 > budgetMs) break;
     try {
-      const { messages, remaining } = await fdTicketMessages(c.id);
+      const { messages, remaining } = await T.fetchTicketMessages(c.id);
       const r = E.analyzeConversation(messages);
       await D.upsertEmpathyCheck({
         ticket_id: c.id, agent_email: c.email, agent_name: c.name, subject: (c.subject || '').slice(0, 250),
@@ -865,6 +845,9 @@ async function runEmpathyChecks(candidates, budgetMs = 8000) {
         resolved_at: new Date(c.resolvedAt).toISOString(), resolved_date: A.shiftDate(Date.parse(c.resolvedAt)),
         frustrated: r.frustrated, acknowledged: r.acknowledged, missing: r.missing, findings: r.findings,
         checked_at: new Date().toISOString(),
+        // new or re-resolved ticket: any earlier Claude review is out of date
+        review_source: 'quick', summary: null, ai_upset: null, ai_empathy_missing: null, ai_reason: null,
+        ai_evidence: null, reviewed_at: null, reviewed_model: null,
       });
       checked++;
       if (remaining < EMPATHY_MIN_RATE_LEFT) break;
@@ -1168,22 +1151,32 @@ app.get('/api/quality/empathy', authMw, async (req,res)=>{
     const range = qualityRange(req.query);
     if (range.error) return res.status(400).json({ok:false,error:range.error});
     const [rows, names] = await Promise.all([D.getEmpathyRange(range.from, range.to), agentNames()]);
+    // A Claude review (scheduled routine) replaces the quick check's verdict.
+    const reviewed = (r) => r.review_source === 'claude';
+    const upset   = (r) => reviewed(r) ? !!r.ai_upset : r.frustrated > 0;
+    const missing = (r) => reviewed(r) ? !!r.ai_empathy_missing : r.missing > 0;
+    const blank = (email, name) => ({ email, name, checked:0, reviewed:0, frustrated:0, acknowledged:0, flagged:0 });
     const by = {};
-    for (const email of Object.keys(names)) by[email] = { email, name:names[email], checked:0, frustrated:0, acknowledged:0, flagged:0 };
+    for (const email of Object.keys(names)) by[email] = blank(email, names[email]);
     for (const r of rows) {
-      const s = by[r.agent_email] = by[r.agent_email] || { email:r.agent_email, name:r.agent_name || r.agent_email, checked:0, frustrated:0, acknowledged:0, flagged:0 };
+      const s = by[r.agent_email] = by[r.agent_email] || blank(r.agent_email, r.agent_name || r.agent_email);
       s.checked++;
-      if (r.frustrated) s.frustrated++;
-      if (r.frustrated && !r.missing) s.acknowledged++;
-      if (r.missing) s.flagged++;
+      if (reviewed(r)) s.reviewed++;
+      if (upset(r)) s.frustrated++;
+      if (upset(r) && !missing(r)) s.acknowledged++;
+      if (missing(r)) s.flagged++;
     }
     const agents = Object.values(by).map(s => ({ ...s, flaggedPct: s.frustrated ? +((s.flagged / s.frustrated) * 100).toFixed(1) : 0 }))
       .sort((a, b) => b.flagged - a.flagged || b.checked - a.checked || a.name.localeCompare(b.name));
-    const flagged = rows.filter(r => r.missing).map(r => ({
+    const flagged = rows.filter(missing).map(r => ({
       ticketId:r.ticket_id, url:r.ticket_url, subject:r.subject, email:r.agent_email, name:r.agent_name,
-      status:r.status, resolvedAt:r.resolved_at, missing:r.missing, frustrated:r.frustrated, findings:r.findings || [],
+      status:r.status, resolvedAt:r.resolved_at, source: reviewed(r) ? 'claude' : 'quick',
+      // quick check
+      missing:r.missing, frustrated:r.frustrated, findings:r.findings || [],
+      // Claude review
+      summary:r.summary, reason:r.ai_reason, evidence:r.ai_evidence || [], reviewedAt:r.reviewed_at,
     }));
-    res.json({ ok:true, from:range.from, to:range.to, checked:rows.length, agents, flagged });
+    res.json({ ok:true, from:range.from, to:range.to, checked:rows.length, reviewed:rows.filter(reviewed).length, agents, flagged });
   } catch(e){
     if (/empathy_checks/.test(e.message) && /schema cache/.test(e.message))
       return res.status(503).json({ok:false,error:'Empathy table is not set up yet — run the empathy_checks SQL from db/schema.sql in Supabase'});

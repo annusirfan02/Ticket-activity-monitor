@@ -422,7 +422,10 @@ tr:hover td{background:rgba(255,255,255,.015)}
             Resolved and closed tickets only. A ticket is flagged when a customer message is upset and the next agent reply has no
             acknowledgement (e.g. "sorry", "I understand", "thank you for your patience"). "Upset" means a negative tone score
             (VADER sentiment, −1 to +1, at or below −0.3) or strong emotion words ("frustrated", "unacceptable", "ridiculous", "!!").
-            Plain status updates like "still can't see it" and polite urgency ("please escalate ASAP") don't count. No AI is used.
+            Plain status updates like "still can't see it" and polite urgency ("please escalate ASAP") don't count.
+            This quick check runs within minutes of a ticket being resolved; an hourly Claude review then re-reads each ticket,
+            adds a summary and replaces the quick verdict ("Reviewed by Claude").
+            <div id="qEmpCoverage" style="margin-top:6px;color:var(--text)"></div>
           </div>
           <div class="tbl-scroll"><table>
             <thead><tr><th>Agent</th><th>Tickets checked</th><th>With frustration</th><th>Acknowledged</th><th>Empathy missing</th><th>Missing rate</th></tr></thead>
@@ -1000,17 +1003,28 @@ function qRender(){
   const person=a=>`<td><div class="an">${esc(a.name)}</div><div class="ae">${esc(a.email)}</div></td>`;
   if(qMode==='empathy'){
     const rows=d.agents.filter(mine);
+    const cov=who?(rows[0]||{checked:0,reviewed:0}):{checked:d.checked,reviewed:d.reviewed||0};
+    document.getElementById('qEmpCoverage').textContent = cov.checked
+      ? `Reviewed by Claude: ${cov.reviewed} of ${cov.checked} tickets in this period (the rest show the quick check until the next review).` : '';
     document.getElementById('qEmpSummary').innerHTML = rows.length ? rows.map(a=>`<tr>${person(a)}
       <td><span class="num">${a.checked}</span></td><td><span class="num">${a.frustrated}</span></td>
       <td><span class="num g">${a.acknowledged}</span></td><td>${red(a.flagged,a.flagged)}</td>
       <td>${a.frustrated?red(a.flagged,a.flaggedPct+'%'):'<span class="empty-cell">–</span>'}</td></tr>`).join('')
       : '<tr><td colspan="6" class="empty">No agents</td></tr>';
     const list=d.flagged.filter(mine);
+    const srcBadge=t=>t.source==='claude'
+      ? `<div class="ae" style="color:var(--accent)">Reviewed by Claude${t.reviewedAt?' · '+qWhen(t.reviewedAt):''}</div>`
+      : '<div class="ae">Quick check · Claude review pending</div>';
+    const said=t=>t.source==='claude'
+      ? `${t.summary?`<div style="margin-bottom:6px">${esc(t.summary)}</div>`:''}${t.evidence.map(e=>e.customer?`<div style="margin-bottom:6px">“${esc(e.customer)}”</div>`:'').join('')}`
+      : t.findings.map(f=>`<div style="margin-bottom:6px">${qMark(f.excerpt,f.cue)}<div class="ae">${qWhen(f.customer_at)}${f.tone!=null?` · tone ${f.tone>0?'+':''}${f.tone}`:''}${f.cue==='negative tone'?' · negative tone':''}</div></div>`).join('');
+    const replied=t=>t.source==='claude'
+      ? `${t.evidence.map(e=>e.agent?`<div style="margin-bottom:6px">“${esc(e.agent)}”</div>`:'').join('')}${t.reason?`<div class="ae" style="color:var(--danger)">${esc(t.reason)}</div>`:''}`
+      : t.findings.map(f=>`<div style="margin-bottom:6px">${esc(f.reply_excerpt)}<div class="ae">${qWhen(f.reply_at)}</div></div>`).join('');
     document.getElementById('qEmpFlagged').innerHTML = list.length ? list.map(t=>`<tr>
-      <td><a class="tkt-link" href="${esc(t.url)}" target="_blank" rel="noopener">#${t.ticketId}</a><div class="ae">${esc(t.subject)}</div></td>
+      <td><a class="tkt-link" href="${esc(t.url)}" target="_blank" rel="noopener">#${t.ticketId}</a><div class="ae">${esc(t.subject)}</div>${srcBadge(t)}</td>
       <td>${esc(t.name)}</td><td class="mono">${qWhen(t.resolvedAt)}</td>
-      <td>${t.findings.map(f=>`<div style="margin-bottom:6px">${qMark(f.excerpt,f.cue)}<div class="ae">${qWhen(f.customer_at)}${f.tone!=null?` · tone ${f.tone>0?'+':''}${f.tone}`:''}${f.cue==='negative tone'?' · negative tone':''}</div></div>`).join('')}</td>
-      <td>${t.findings.map(f=>`<div style="margin-bottom:6px">${esc(f.reply_excerpt)}<div class="ae">${qWhen(f.reply_at)}</div></div>`).join('')}</td></tr>`).join('')
+      <td>${said(t)}</td><td>${replied(t)}</td></tr>`).join('')
       : `<tr><td colspan="5" class="empty">No flagged tickets${d.checked?'':' — none checked in this period yet (checks run with each poll)'}</td></tr>`;
   } else {
     const rows=d.agents.filter(mine);

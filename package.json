@@ -5,7 +5,9 @@
   "main": "api/index.js",
   "scripts": {
     "dev": "node api/server.js",
-    "start": "node api/server.js"
+    "start": "node api/server.js",
+    "empathy:pending": "node scripts/empathy-review/pending.js",
+    "empathy:save": "node scripts/empathy-review/save.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

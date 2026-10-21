@@ -219,6 +219,18 @@ create table if not exists empathy_checks (
 create index if not exists idx_empathy_date  on empathy_checks(resolved_date);
 create index if not exists idx_empathy_agent on empathy_checks(agent_email);
 
+-- Claude review (scheduled routine, scripts/empathy-review/) on top of the quick check.
+-- review_source: 'quick' = only the rule-based check so far; 'claude' = reviewed.
+alter table empathy_checks add column if not exists review_source      text default 'quick';
+alter table empathy_checks add column if not exists summary            text;
+alter table empathy_checks add column if not exists ai_upset           boolean;
+alter table empathy_checks add column if not exists ai_empathy_missing boolean;
+alter table empathy_checks add column if not exists ai_reason          text;
+alter table empathy_checks add column if not exists ai_evidence        jsonb;   -- [{customer, agent}] short quotes
+alter table empathy_checks add column if not exists reviewed_at        timestamptz;
+alter table empathy_checks add column if not exists reviewed_model     text;
+create index if not exists idx_empathy_review on empathy_checks(review_source);
+
 -- ── Agent activity: latest own reply/note per agent, on any ticket ──
 -- ticket_scan remembers which ticket version was already read, so each
 -- ticket's conversations are fetched only after it changes.

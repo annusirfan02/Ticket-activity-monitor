@@ -230,6 +230,8 @@ alter table empathy_checks add column if not exists ai_evidence        jsonb;   
 alter table empathy_checks add column if not exists reviewed_at        timestamptz;
 alter table empathy_checks add column if not exists reviewed_model     text;
 create index if not exists idx_empathy_review on empathy_checks(review_source);
+-- ticket's Freshdesk group (0 = none), for the Group PDF
+alter table empathy_checks add column if not exists group_id bigint;
 
 -- ── Agent activity: latest own reply/note per agent, on any ticket ──
 -- ticket_scan remembers which ticket version was already read, so each

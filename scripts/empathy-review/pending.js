@@ -29,9 +29,10 @@ const mask = (s) => s
   for (const k of ['FRESHDESK_DOMAIN', 'FRESHDESK_API_KEY', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY'])
     if (!process.env[k]) { console.error(`Missing env var ${k}`); process.exit(1); }
   const from = new Date(Date.now() - DAYS * 86400000).toISOString().slice(0, 10);
+  // not yet reviewed and recent, or explicitly queued for a re-review ('recheck', any date)
   const { data, error } = await D.db().from('empathy_checks')
     .select('ticket_id,agent_name,subject,resolved_at,status')
-    .neq('review_source', 'claude').gte('resolved_date', from)
+    .or(`review_source.eq.recheck,and(review_source.neq.claude,resolved_date.gte.${from})`)
     .order('resolved_at', { ascending: true }).limit(LIMIT);
   if (error) throw new Error(`Supabase: ${error.message}${error.details ? ' | ' + error.details : ''}`);
   const tickets = [];

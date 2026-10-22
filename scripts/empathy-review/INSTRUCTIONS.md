@@ -53,12 +53,23 @@ understanding") that ignores what the customer just said. An apology that only
 comes in a later reply doesn't undo a missed first reply — mention it in
 `reason` instead. If `customer_upset` is false, set `empathy_missing` to false.
 
+If **no agent reply follows** an upset message in the ticket (the customer had
+the last word, e.g. the issue was handled by phone or the ticket was closed),
+that message can't be judged: it does not count as missed empathy. If that is
+the only upset message, set `empathy_missing` to false and say in `reason` that
+no agent reply followed.
+
 Some tickets (e.g. from chat) contain almost no customer text (just a subject
 like "Other -"). Judge only what is there; with no customer wording, the
 customer is not upset.
 
+**reason** — paraphrase in your own words; it is printed in PDF reports, so
+never quote the customer's words and never include names of people. Agent
+wording may be described ("a stock 'thank you for your patience' line").
+
 **evidence** — up to 3 short exact quotes (customer message and the agent reply
 that followed) that support the verdict. Empty array when nothing stands out.
+These stay in the dashboard only.
 
 **summary** — factual, no names of people, no masked values, no judgement words.
 

@@ -10,6 +10,7 @@ const R        = require('./report');
 const A        = require('./attendance');
 const E        = require('./empathy');
 const T        = require('./ticket-thread');
+const Q        = require('./quality');
 
 const app = express();
 app.use(express.json());
@@ -504,7 +505,7 @@ async function runPoll() {
     if ((t.status===5 || label.includes('closed'))   && upd>=winStart) { m.closed++; g.closed++; }
     // resolved/closed tickets are handed to the empathy check (run from /api/cron)
     if (t.status === 4 || t.status === 5) empathyCandidates.push({
-      id: t.id, email, name: email2name[email] || email, subject: t.subject, status: t.status,
+      id: t.id, email, name: email2name[email] || email, subject: t.subject, status: t.status, groupId: t.group_id || 0,
       resolvedAt: t.stats?.resolved_at || t.stats?.closed_at || t.updated_at,
     });
 
@@ -841,7 +842,7 @@ async function runEmpathyChecks(candidates, budgetMs = 8000) {
       const r = E.analyzeConversation(messages);
       await D.upsertEmpathyCheck({
         ticket_id: c.id, agent_email: c.email, agent_name: c.name, subject: (c.subject || '').slice(0, 250),
-        ticket_url: ticketUrl(c.id), status: c.status,
+        ticket_url: ticketUrl(c.id), status: c.status, group_id: c.groupId,
         resolved_at: new Date(c.resolvedAt).toISOString(), resolved_date: A.shiftDate(Date.parse(c.resolvedAt)),
         frustrated: r.frustrated, acknowledged: r.acknowledged, missing: r.missing, findings: r.findings,
         checked_at: new Date().toISOString(),
@@ -1151,24 +1152,17 @@ app.get('/api/quality/empathy', authMw, async (req,res)=>{
     const range = qualityRange(req.query);
     if (range.error) return res.status(400).json({ok:false,error:range.error});
     const [rows, names] = await Promise.all([D.getEmpathyRange(range.from, range.to), agentNames()]);
-    // A Claude review (scheduled routine) replaces the quick check's verdict.
-    const reviewed = (r) => r.review_source === 'claude';
-    const upset   = (r) => reviewed(r) ? !!r.ai_upset : r.frustrated > 0;
-    const missing = (r) => reviewed(r) ? !!r.ai_empathy_missing : r.missing > 0;
-    const blank = (email, name) => ({ email, name, checked:0, reviewed:0, frustrated:0, acknowledged:0, flagged:0 });
-    const by = {};
-    for (const email of Object.keys(names)) by[email] = blank(email, names[email]);
-    for (const r of rows) {
-      const s = by[r.agent_email] = by[r.agent_email] || blank(r.agent_email, r.agent_name || r.agent_email);
-      s.checked++;
-      if (reviewed(r)) s.reviewed++;
-      if (upset(r)) s.frustrated++;
-      if (upset(r) && !missing(r)) s.acknowledged++;
-      if (missing(r)) s.flagged++;
-    }
-    const agents = Object.values(by).map(s => ({ ...s, flaggedPct: s.frustrated ? +((s.flagged / s.frustrated) * 100).toFixed(1) : 0 }))
-      .sort((a, b) => b.flagged - a.flagged || b.checked - a.checked || a.name.localeCompare(b.name));
-    const flagged = rows.filter(missing).map(r => ({
+    // per-agent totals use the same rules as the PDF reports (api/quality.js)
+    const byEmail = {};
+    for (const email of Object.keys(names)) byEmail[email] = [];
+    for (const r of rows) (byEmail[r.agent_email] = byEmail[r.agent_email] || []).push(r);
+    const agents = Object.entries(byEmail).map(([email, list]) => {
+      const t = Q.empathyTotals(list);
+      return { email, name: names[email] || list[0]?.agent_name || email, checked:t.checked, reviewed:t.reviewed,
+        frustrated:t.upset, acknowledged:t.acknowledged, flagged:t.missed, flaggedPct:t.missedPct ?? 0 };
+    }).sort((a, b) => b.flagged - a.flagged || b.checked - a.checked || a.name.localeCompare(b.name));
+    const reviewed = (r) => Q.empathyVerdict(r).reviewed;
+    const flagged = rows.filter(r => Q.empathyVerdict(r).missed).map(r => ({
       ticketId:r.ticket_id, url:r.ticket_url, subject:r.subject, email:r.agent_email, name:r.agent_name,
       status:r.status, resolvedAt:r.resolved_at, source: reviewed(r) ? 'claude' : 'quick',
       // quick check
@@ -1184,39 +1178,18 @@ app.get('/api/quality/empathy', authMw, async (req,res)=>{
   }
 });
 
-// CSAT: Freshdesk satisfaction ratings, read live. Freshdesk scores: 101–103
-// positive, 100 neutral, -101…-103 negative (the scale depends on the survey).
-const csatTone = (v) => v > 100 ? 'positive' : v === 100 ? 'neutral' : v < 0 ? 'negative' : 'neutral';
+// CSAT: Freshdesk satisfaction ratings, read live (api/quality.js).
 app.get('/api/quality/csat', authMw, async (req,res)=>{
   try {
     const range = qualityRange(req.query);
     if (range.error) return res.status(400).json({ok:false,error:range.error});
-    // a day of margin either side; exact filtering is by date in DISPLAY_TZ below
-    const since = new Date(Date.parse(range.from + 'T00:00:00Z') - 86400000).toISOString();
-    const ratings = [];
-    for (let page = 1; page <= 30; page++) {
-      const { data } = await axios.get(`${fdBase()}/surveys/satisfaction_ratings?created_since=${since}&per_page=100&page=${page}`, { headers: fdHeaders() });
-      ratings.push(...(data || []));
-      if (!data || data.length < 100) break;
-    }
-    const [fdList, names] = await Promise.all([fdAgents(), agentNames()]);
-    const id2email = {}; fdList.forEach(a => id2email[a.id] = (a.contact?.email || '').toLowerCase().trim());
-    const by = {};
-    for (const email of Object.keys(names)) by[email] = { email, name:names[email], total:0, positive:0, neutral:0, negative:0 };
-    const negatives = [];
-    let other = 0;
-    for (const r of ratings) {
-      const day = A.shiftDate(Date.parse(r.created_at));
-      if (day < range.from || day > range.to) continue;
-      const email = id2email[r.agent_id];
-      if (!email || !by[email]) { other++; continue; }   // agent not tracked
-      const tone = csatTone(+(r.ratings?.default_question));
-      by[email].total++; by[email][tone]++;
-      if (tone === 'negative') negatives.push({ ticketId:r.ticket_id, url:ticketUrl(r.ticket_id), email, name:names[email],
-        createdAt:r.created_at, feedback:r.feedback || '' });
-    }
-    const agents = Object.values(by).map(s => ({ ...s, csatPct: s.total ? +((s.positive / s.total) * 100).toFixed(1) : null }))
+    const [ratings, names] = await Promise.all([Q.fetchCsatRatings(range.from, range.to), agentNames()]);
+    const tracked = ratings.filter(r => r.email && names[r.email]);
+    const agents = Object.keys(names).map(email => ({ email, name:names[email], ...Q.csatTotals(tracked.filter(r => r.email === email)) }))
       .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+    const negatives = tracked.filter(r => r.tone === 'negative').map(r => ({ ticketId:r.ticketId, url:ticketUrl(r.ticketId),
+      email:r.email, name:names[r.email], createdAt:r.createdAt, feedback:r.feedback }));
+    const other = ratings.length - tracked.length;   // ratings for agents not tracked here
     negatives.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
     res.json({ ok:true, from:range.from, to:range.to, agents, negatives, otherAgents:other });
   } catch(e){ console.error('csat:', e.message); res.status(500).json({ok:false,error:e.message}); }

@@ -373,6 +373,8 @@ tr:hover td{background:rgba(255,255,255,.015)}
               <label><input type="checkbox" value="late_shifts" checked/> Late Shifts</label>
               <label><input type="checkbox" value="off_breaks" checked/> Off-Schedule Breaks</label>
               <label><input type="checkbox" value="custom" checked/> Custom Statuses (A2P, GHL, etc)</label>
+              <label><input type="checkbox" value="csat" checked/> CSAT</label>
+              <label><input type="checkbox" value="empathy" checked/> Empathy</label>
             </div>
           </div>
         </div>
@@ -1057,7 +1059,8 @@ async function loadThresholds(){
   const tb=document.getElementById('threshBody');
   try{
     const r=await authFetch('/api/thresholds'); const d=await r.json(); if(!d.ok)throw new Error(d.error);
-    const labels={late_shifts:'Late shifts (days/month)',off_breaks:'Off-schedule breaks',avg_response:'Avg response (min)',sla_breach_pct:'Response-SLA breach (%)'};
+    const labels={late_shifts:'Late shifts (days/month)',off_breaks:'Off-schedule breaks',avg_response:'Avg response (min)',sla_breach_pct:'Response-SLA breach (%)',
+      csat_pct:'CSAT % — higher is better (green ≥ · yellow ≥)',empathy_missed_pct:'Empathy missed (% of upset customers)'};
     tb.innerHTML=Object.entries(d.thresholds).map(([m,t])=>`<tr>
       <td>${labels[m]||m}</td>
       <td><input type="number" id="g_${m}" value="${t.green_max}" style="width:70px;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:4px 7px;color:var(--text);font-family:var(--mono)"/></td>

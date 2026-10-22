@@ -1,6 +1,7 @@
 // api/report.js — month-end report computation + PDF generation
 const PDFDocument = require('pdfkit');
 const D = require('./db');
+const Q = require('./quality');
 
 // Default flag thresholds (editable via dashboard → stored in DB)
 const DEFAULT_THRESHOLDS = {
@@ -8,15 +9,40 @@ const DEFAULT_THRESHOLDS = {
   off_breaks:     { green_max: 1,  yellow_max: 3 },   // off-schedule breaks in month
   avg_response:   { green_max: 15, yellow_max: 30 },  // minutes
   sla_breach_pct: { green_max: 5,  yellow_max: 15 },  // percent
+  csat_pct:       { green_max: 90, yellow_max: 75 },  // percent positive — higher is better (green ≥ 90)
+  empathy_missed_pct: { green_max: 10, yellow_max: 25 }, // percent of upset customers
 };
+// For these metrics the stored green/yellow values are minimums, not maximums.
+const HIGHER_IS_BETTER = new Set(['csat_pct']);
 
 function flagFor(metric, value, thresholds) {
   const t = thresholds[metric] || DEFAULT_THRESHOLDS[metric];
   if (!t) return 'green';
+  if (HIGHER_IS_BETTER.has(metric)) {
+    if (value >= t.green_max) return 'green';
+    if (value >= t.yellow_max) return 'yellow';
+    return 'red';
+  }
   if (value <= t.green_max) return 'green';
   if (value <= t.yellow_max) return 'yellow';
   return 'red';
 }
+
+/**
+ * CSAT ratings and empathy checks for a period, for the reports. Each part is
+ * null when not wanted, or { unavailable: message } if it couldn't be read, so
+ * a Freshdesk hiccup never stops a report.
+ */
+async function loadCustomerExperience(fromDate, toDate, { csat = true, empathy = true } = {}) {
+  const [csatRes, empRes] = await Promise.allSettled([
+    csat ? Q.fetchCsatRatings(fromDate, toDate) : Promise.resolve(null),
+    empathy ? D.getEmpathyRange(fromDate, toDate) : Promise.resolve(null),
+  ]);
+  const part = (r, label) => r.status === 'fulfilled' ? r.value
+    : (console.error(`${label}:`, r.reason?.message), { unavailable: `${label} could not be loaded` });
+  return { ratings: part(csatRes, 'CSAT'), empathyRows: part(empRes, 'Empathy') };
+}
+const cxList = (x) => Array.isArray(x) ? x : null;
 
 // month boundaries
 function monthBounds(monthKey) {
@@ -66,7 +92,7 @@ async function buildRangeReports(fromDate, toDate, options = {}) {
 }
 
 async function buildReports(fromDate, toDate, options, monthKey) {
-  const selected = options.selected || ['resolved_closed','a2p','ghl','custom','avg_response','first_reply','sla','late_shifts','off_breaks'];
+  const selected = options.selected || ['resolved_closed','a2p','ghl','custom','avg_response','first_reply','sla','late_shifts','off_breaks','csat','empathy'];
 
   // thresholds
   const thRows = await D.getThresholds();
@@ -74,14 +100,17 @@ async function buildReports(fromDate, toDate, options, monthKey) {
   for (const r of thRows) thresholds[r.metric] = { green_max: +r.green_max, yellow_max: +r.yellow_max };
 
   // pull data
-  const [agents, statsRange, slaRange, lateShifts, breakLogs, missedShifts] = await Promise.all([
+  const [agents, statsRange, slaRange, lateShifts, breakLogs, missedShifts, cx] = await Promise.all([
     D.getAgents(),
     D.getStatsRange(fromDate, toDate),
     D.getSlaRange(fromDate, toDate),
     monthKey ? D.getLateShifts(monthKey) : D.getLateShiftsRange(fromDate, toDate),
     D.getBreakLogRange(fromDate, toDate),
     D.getMissedShiftsRange(fromDate, toDate),
+    // CSAT / empathy for the same period; stored with monthly reports as a snapshot
+    loadCustomerExperience(fromDate, toDate, { csat: selected.includes('csat'), empathy: selected.includes('empathy') }),
   ]);
+  const ratings = cxList(cx.ratings), empathyRows = cxList(cx.empathyRows);
 
   const weeks = weeksOfRange(fromDate, toDate);
   const range = monthKey ? undefined : { from: fromDate, to: toDate };
@@ -155,6 +184,26 @@ async function buildReports(fromDate, toDate, options, monthKey) {
     const missedCount = a.missed.length;
     if (missedCount && selected.includes('late_shifts')) concerns.push(`${missedCount} shift${missedCount===1?'':'s'} with no clock-in`);
 
+    // customer experience: CSAT ratings and empathy checks for this agent
+    let csat = null, empathy = null;
+    if (selected.includes('csat')) {
+      csat = ratings ? Q.csatTotals(ratings.filter(r => r.email === email)) : { unavailable: cx.ratings?.unavailable };
+      if (csat.csatPct != null) {
+        flags.csat_pct = flagFor('csat_pct', csat.csatPct, thresholds);
+        if (flags.csat_pct === 'red') concerns.push(`${csat.csatPct}% CSAT (${csat.negative} negative of ${csat.total})`);
+      }
+    }
+    if (selected.includes('empathy')) {
+      if (empathyRows) {
+        const mine = empathyRows.filter(r => r.agent_email === email);
+        empathy = { ...Q.empathyTotals(mine), missedList: Q.empathyMissedList(mine) };
+      } else empathy = { unavailable: cx.empathyRows?.unavailable };
+      if (empathy.missedPct != null) {
+        flags.empathy_missed_pct = flagFor('empathy_missed_pct', empathy.missedPct, thresholds);
+        if (flags.empathy_missed_pct === 'red') concerns.push(`empathy missed with ${empathy.missed} of ${empathy.upset} upset customers`);
+      }
+    }
+
     reports.push({
       email, name: a.name, monthKey, range,
       weekly,
@@ -168,14 +217,19 @@ async function buildReports(fromDate, toDate, options, monthKey) {
       lateDetail: a.late.map(l=>({date:l.log_date, lateMin:l.late_min})),
       missedDetail: a.missed.map(x=>({ start:x.scheduled_start, end:x.scheduled_end })),
       breakDetail: a.breaks.map(b=>({date:b.log_date, lateMin:b.late_min})),
+      csat, empathy,
       flags, concerns, selected,
     });
   }
 
+  // team CSAT / empathy are over tracked agents' ratings and tickets only
+  const tracked = new Set(Object.keys(byAgent));
   const teamAvg = {
     resolved: teamAgg.agents ? +(teamAgg.resolved/teamAgg.agents).toFixed(1) : 0,
     closed: teamAgg.agents ? +(teamAgg.closed/teamAgg.agents).toFixed(1) : 0,
     avgResponseMin: teamAgg.avgRespN ? +(teamAgg.avgRespSum/teamAgg.avgRespN).toFixed(1) : 0,
+    csat: ratings ? Q.csatTotals(ratings.filter(r => tracked.has(r.email))) : null,
+    empathy: empathyRows ? Q.empathyTotals(empathyRows.filter(r => tracked.has(r.agent_email))) : null,
   };
   for (const r of reports) r.teamAvg = teamAvg;
 
@@ -281,6 +335,9 @@ function generatePDF(report) {
     if (inc('avg_response') && f.avg_response === 'red')   concerns.push(['Average response time', `${fmtMin(t.avgResponseMin)} on average`]);
     if (inc('sla')          && f.sla_breach_pct === 'red') concerns.push(['Response-SLA breach', `${t.slaBreachPct}% of due responses missed (${t.slaBreached} of ${t.slaDue})`]);
     if (inc('late_shifts')  && t.missedShifts) concerns.push(['No clock-in', `${t.missedShifts} rostered shift${t.missedShifts === 1 ? '' : 's'} with no clock-in and no leave`]);
+    const cs = report.csat, em = report.empathy;   // absent on reports generated before these existed
+    if (inc('csat') && f.csat_pct === 'red') concerns.push(['CSAT', `${cs.csatPct}% positive (${cs.negative} negative of ${cs.total} ratings)`]);
+    if (inc('empathy') && f.empathy_missed_pct === 'red') concerns.push(['Empathy missed', `with ${em.missed} of ${em.upset} upset customers`]);
     {
       const tone = concerns.length ? 'red' : 'green';
       const h = concerns.length ? 34 + concerns.length * 16 : 36;
@@ -316,6 +373,10 @@ function generatePDF(report) {
     // reports generated before this metric existed have no missedShifts field
     if (inc('late_shifts') && t.missedShifts !== undefined) cards.push({ label:'No clock-in', value:String(t.missedShifts),
       sub:'rostered shifts, no leave', flag: t.missedShifts ? 'red' : 'green' });
+    if (inc('csat') && cs && !cs.unavailable) cards.push({ label:'CSAT', value: cs.csatPct != null ? `${cs.csatPct}%` : '–',
+      sub: cs.total ? `${cs.total} ratings${ta.csat?.csatPct != null ? ` · team ${ta.csat.csatPct}%` : ''}` : 'no ratings', flag:f.csat_pct });
+    if (inc('empathy') && em && !em.unavailable) cards.push({ label:'Empathy missed', value: String(em.missed),
+      sub: em.upset ? `of ${em.upset} upset · ${em.missedPct}%` : (em.checked ? 'no upset customers' : 'no data'), flag:f.empathy_missed_pct });
 
     if (cards.length) {
       sectionTitle(`${Unit} at a glance`);
@@ -402,6 +463,53 @@ function generatePDF(report) {
         { totalRow: [`${Unit} total`, String(totalNew), String(t.resolved ?? 0), String(t.closed ?? 0),
           fmtMin(t.avgResponseMin), fmtMin(t.firstReplyMin),
           { text: t.slaDue ? `${t.slaBreachPct}%` : '–', color: f.sla_breach_pct ? FLAG_COLOR[f.sla_breach_pct] : undefined }] });
+    }
+
+    // ── Customer experience: CSAT counts and empathy check results ──
+    const note = (text) => { ensure(20); doc.font('Helvetica').fontSize(8.5).fillColor(C.muted).text(text, M, y, { width:W }); y = doc.y + 8; };
+    const showCsat = inc('csat') && cs, showEmp = inc('empathy') && em;
+    if (showCsat || showEmp) {
+      sectionTitle('Customer experience', `${month} · CSAT from Freshdesk, empathy from resolved/closed tickets`, 90);
+      if (showCsat) {
+        if (cs.unavailable) note(`CSAT: ${cs.unavailable}.`);
+        else drawTable([{ label:'CSAT', width:W - 340 }, { label:'Ratings', width:64, align:'right' }, { label:'Positive', width:66, align:'right' },
+          { label:'Neutral', width:64, align:'right' }, { label:'Negative', width:66, align:'right' }, { label:'CSAT %', width:80, align:'right' }],
+          [['This agent', String(cs.total), String(cs.positive), String(cs.neutral),
+            cs.negative ? { text:String(cs.negative), color:FLAG_COLOR.red } : '0',
+            cs.csatPct != null ? { text:`${cs.csatPct}%`, color: f.csat_pct && f.csat_pct !== 'green' ? FLAG_COLOR[f.csat_pct] : undefined } : '–'],
+           ...(ta.csat ? [['Team', String(ta.csat.total), String(ta.csat.positive), String(ta.csat.neutral), String(ta.csat.negative),
+             ta.csat.csatPct != null ? `${ta.csat.csatPct}%` : '–']] : [])]);
+      }
+      if (showEmp) {
+        if (em.unavailable) note(`Empathy: ${em.unavailable}.`);
+        else if (!em.checked) note(`Empathy: no resolved or closed tickets were checked in this ${unit}. Empathy checks started on Oct 7, 2026.`);
+        else {
+          y += 4;
+          drawTable([{ label:'Empathy', width:W - 380 }, { label:'Checked', width:62, align:'right' }, { label:'By Claude', width:66, align:'right' },
+            { label:'Upset', width:56, align:'right' }, { label:'Acknowl.', width:66, align:'right' }, { label:'Missed', width:58, align:'right' },
+            { label:'Missed %', width:72, align:'right' }],
+            [['This agent', String(em.checked), String(em.reviewed), String(em.upset), String(em.acknowledged),
+              em.missed ? { text:String(em.missed), color:FLAG_COLOR.red } : '0',
+              em.missedPct != null ? { text:`${em.missedPct}%`, color: f.empathy_missed_pct && f.empathy_missed_pct !== 'green' ? FLAG_COLOR[f.empathy_missed_pct] : undefined } : '–']]);
+          // the tickets where empathy was missed, with the reason (no customer quotes)
+          const list = em.missedList || [];
+          if (list.length) {
+            ensure(40); y += 4;
+            doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.ink).text('Tickets where empathy was missed', M, y); y = doc.y + 6;
+            for (const it of list) {
+              const head = `#${it.ticketId}  ·  ${it.date ? dayLabel(it.date) : ''}  ·  ${it.source === 'claude' ? 'Reviewed by Claude' : 'Quick check'}`;
+              doc.font('Helvetica').fontSize(8.5);
+              const h = 14 + doc.heightOfString(it.reason || '–', { width:W - 14 });
+              ensure(h + 8);
+              doc.rect(M, y, 3, h).fill(FLAG_COLOR.red);
+              doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.ink).text(head, M + 10, y, { width:W - 14, lineBreak:false });
+              doc.font('Helvetica').fontSize(8.5).fillColor(C.body).text(it.reason || '–', M + 10, y + 13, { width:W - 14 });
+              y += h + 8;
+            }
+          }
+          if (em.checked > em.reviewed) note(`${em.checked - em.reviewed} of ${em.checked} tickets show the quick check only (Claude review pending or outside the review window).`);
+        }
+      }
     }
 
     // Day/minutes grid used by the late-shift and break detail sections.
@@ -563,6 +671,8 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       if (inc('avg_response') && f.avg_response === 'red')   items.push(`${fmtMin(t.avgResponseMin)} avg response`);
       if (inc('sla')          && f.sla_breach_pct === 'red') items.push(`${t.slaBreachPct}% SLA breach`);
       if (inc('late_shifts')  && t.missedShifts) items.push(`${t.missedShifts} shift${t.missedShifts === 1 ? '' : 's'} with no clock-in`);
+      if (inc('csat')    && f.csat_pct === 'red') items.push(`${r.csat.csatPct}% CSAT`);
+      if (inc('empathy') && f.empathy_missed_pct === 'red') items.push(`empathy missed with ${r.empathy.missed} of ${r.empathy.upset} upset`);
       if (items.length) attention.push([r.name || r.email, items.join(', ')]);
     }
     {
@@ -599,6 +709,14 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       const n = sumT('missedShifts'), who = agents.filter(r => r.totals?.missedShifts).length;
       cards.push({ label:'No clock-in', value:String(n), sub:`${who} agent${who === 1 ? '' : 's'} · rostered, no leave`, flag: n ? 'red' : 'green' });
     }
+    // team CSAT / empathy (absent on reports generated before these existed)
+    const tcs = agents[0]?.teamAvg?.csat, tem = agents[0]?.teamAvg?.empathy;
+    const teamCsatFlag = tcs?.csatPct != null ? flagFor('csat_pct', tcs.csatPct, thresholds) : undefined;
+    const teamEmpFlag = tem?.missedPct != null ? flagFor('empathy_missed_pct', tem.missedPct, thresholds) : undefined;
+    if (inc('csat') && tcs) cards.push({ label:'CSAT', value: tcs.csatPct != null ? `${tcs.csatPct}%` : '–',
+      sub: tcs.total ? `${tcs.total} ratings · ${tcs.negative} negative` : 'no ratings', flag:teamCsatFlag });
+    if (inc('empathy') && tem) cards.push({ label:'Empathy missed', value:String(tem.missed),
+      sub: tem.upset ? `of ${tem.upset} upset · ${tem.missedPct}%` : (tem.checked ? 'no upset customers' : 'no data'), flag:teamEmpFlag });
     if (cards.length) {
       sectionTitle('Team at a glance');
       const perRow = 4, gap = 10, cw = (W - gap*(perRow-1)) / perRow, ch = 64;
@@ -694,6 +812,27 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       drawTable([{ label:'Agent', width:W - cols.reduce((s, c) => s + c.width, 0) }, ...cols], rows);
     }
 
+    // ── Customer experience by agent: CSAT counts and empathy results ──
+    if ((inc('csat') && tcs) || (inc('empathy') && tem)) {
+      const withCsat = inc('csat') && tcs, withEmp = inc('empathy') && tem;
+      const red = (n) => n ? { text:String(n), color:FLAG_COLOR.red } : '0';
+      const pctCell = (v, flag) => v == null ? '–' : flagged(`${v}%`, flag);
+      const cols = [
+        ...(withCsat ? [{ label:'Ratings', width:50, align:'right' }, { label:'Negative', width:56, align:'right' }, { label:'CSAT %', width:56, align:'right' }] : []),
+        ...(withEmp ? [{ label:'Checked', width:54, align:'right' }, { label:'Upset', width:46, align:'right' }, { label:'Missed', width:50, align:'right' }, { label:'Missed %', width:60, align:'right' }] : []),
+      ];
+      const row = (name, c, e, cf, ef) => [name,
+        ...(withCsat ? [String(c?.total ?? 0), red(c?.negative), pctCell(c?.csatPct, cf)] : []),
+        ...(withEmp ? [String(e?.checked ?? 0), String(e?.upset ?? 0), red(e?.missed), pctCell(e?.missedPct, ef)] : [])];
+      const rows = agents.slice()
+        .sort((a, b) => (b.empathy?.missed || 0) - (a.empathy?.missed || 0) || (a.csat?.csatPct ?? 101) - (b.csat?.csatPct ?? 101))
+        .map(r => row(r.name || r.email, r.csat, r.empathy, r.flags?.csat_pct, r.flags?.empathy_missed_pct));
+      const noteText = withEmp && tem && tem.checked > tem.reviewed ? `${tem.reviewed} of ${tem.checked} tickets reviewed by Claude` : 'Sorted by empathy missed';
+      sectionTitle('Customer experience', noteText, (rows.length + 2) * ROW_H);
+      drawTable([{ label:'Agent', width:W - cols.reduce((s, c) => s + c.width, 0) }, ...cols], rows,
+        { totalRow: row('Team', tcs, tem, teamCsatFlag, teamEmpFlag) });
+    }
+
     // ── Ticket statuses (team totals) ──
     if (inc('custom') || inc('a2p') || inc('ghl')) {
       const custom = {};
@@ -747,7 +886,13 @@ const groupActivity = (t) => t.newTickets + t.resolved + t.closed + t.slaDue + t
  * (group stats only exist from when collection started).
  */
 async function buildGroupReports(fromDate, toDate) {
-  const [rows, agents] = await Promise.all([D.getGroupStatsRange(fromDate, toDate), D.getAgents()]);
+  const agents = await D.getAgents();
+  const [rows, cx] = await Promise.all([
+    D.getGroupStatsRange(fromDate, toDate),
+    // CSAT and empathy per group for the same period (never fails the report)
+    Q.groupCustomerExperience(fromDate, toDate, new Set(agents.map(a => a.email.toLowerCase())))
+      .catch(e => { console.error('group cx:', e.message); return null; }),
+  ]);
   const names = {}; agents.forEach(a => names[a.email] = a.name || a.email);
   const weeks = weeksOfRange(fromDate, toDate);
   const groups = {}, all = blankGroupAcc();
@@ -773,7 +918,7 @@ async function buildGroupReports(fromDate, toDate) {
   })).filter(g => groupActivity(g.totals))
     // busiest first; "No group" last
     .sort((a, b) => (!a.id) - (!b.id) || (b.totals.resolved + b.totals.closed) - (a.totals.resolved + a.totals.closed));
-  return { from:fromDate, to:toDate, dataFrom, groups:out, totals:finishGroupAcc(all) };
+  return { from:fromDate, to:toDate, dataFrom, groups:out, totals:finishGroupAcc(all), cx };
 }
 
 // Shared page layout for the group PDF: header band, section titles, callouts,
@@ -916,6 +1061,32 @@ function generateGroupPDF(data, { monthKey, thresholds = DEFAULT_THRESHOLDS } = 
         [['Earlier days are not included', ' – group stats are collected from the day this feature went live.']]);
     }
 
+    // ── Customer experience by group: CSAT counts and empathy results ──
+    const drawCustomerExperience = () => {
+      const cx = data.cx;
+      if (!cx || (!cx.totals.csat && !cx.totals.empathy)) return;
+      const rows = cx.groups.filter(g => (g.csat?.total || 0) + (g.empathy?.checked || 0) > 0)
+        .sort((a, b) => (b.empathy?.missed || 0) - (a.empathy?.missed || 0) || (b.csat?.total || 0) - (a.csat?.total || 0));
+      if (!rows.length) return;
+      const red = (n) => n ? { text:String(n), color:FLAG_COLOR.red } : '0';
+      const csatCell = (c) => c?.csatPct == null ? '–' : flagged(`${c.csatPct}%`, flagFor('csat_pct', c.csatPct, thresholds));
+      const missCell = (e) => e?.missedPct == null ? '–' : flagged(`${e.missedPct}%`, flagFor('empathy_missed_pct', e.missedPct, thresholds));
+      const cols = [
+        { label:'Ratings', width:50, align:'right' }, { label:'Negative', width:56, align:'right' }, { label:'CSAT %', width:56, align:'right' },
+        { label:'Checked', width:54, align:'right' }, { label:'Upset', width:46, align:'right' }, { label:'Missed', width:50, align:'right' },
+        { label:'Missed %', width:60, align:'right' },
+      ];
+      const row = (name, c, e) => [name, String(c?.total ?? 0), red(c?.negative), csatCell(c),
+        String(e?.checked ?? 0), String(e?.upset ?? 0), red(e?.missed), missCell(e)];
+      const note = cx.unknownGroup ? `${cx.unknownGroup} empathy checks predate group tracking and only count in the total` : 'CSAT from Freshdesk · empathy from resolved/closed tickets';
+      L.sectionTitle('Customer experience by group', note, (rows.length + 2) * L.ROW_H);
+      L.table([{ label:'Group', width:L.W - cols.reduce((s, c) => s + c.width, 0) }, ...cols],
+        rows.map(g => row(g.name, g.csat, g.empathy)),
+        { totalRow: row('All groups', cx.totals.csat, cx.totals.empathy) });
+    };
+
+    if (!groups.length) drawCustomerExperience();
+
     if (groups.length) {
       const totals = data.totals;
 
@@ -924,6 +1095,8 @@ function generateGroupPDF(data, { monthKey, thresholds = DEFAULT_THRESHOLDS } = 
       L.table([{ label:'Group', width:L.W - used }, ...metricCols],
         groups.map(g => [g.name, ...cells(g.totals)]),
         { totalRow:['All groups', ...cells(totals)] });
+
+      drawCustomerExperience();
 
       // ── One section per group ──
       for (const g of groups) {

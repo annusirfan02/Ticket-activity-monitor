@@ -236,6 +236,24 @@ create index if not exists idx_empathy_review on empathy_checks(review_source);
 -- ticket's Freshdesk group (0 = none), for the Group PDF
 alter table empathy_checks add column if not exists group_id bigint;
 
+-- ── Reply times: one row per agent reply that answered a waiting customer ──
+-- (api/responses.js). wait_start = the customer's first unanswered message;
+-- wait_working_min counts only the replying agent's rostered shifts.
+create table if not exists response_events (
+  ticket_id         bigint not null,
+  replied_at        timestamptz not null,
+  agent_email       text not null,
+  wait_start        timestamptz not null,
+  wait_calendar_min numeric,
+  wait_working_min  numeric,            -- null if shifts couldn't be read yet
+  is_first          boolean default false, -- the ticket's first agent reply
+  group_id          bigint,
+  reply_date        date,               -- in DISPLAY_TZ
+  primary key (ticket_id, replied_at)
+);
+create index if not exists idx_resp_date  on response_events(reply_date);
+create index if not exists idx_resp_agent on response_events(agent_email);
+
 -- ── Agent activity: latest own reply/note per agent, on any ticket ──
 -- ticket_scan remembers which ticket version was already read, so each
 -- ticket's conversations are fetched only after it changes.

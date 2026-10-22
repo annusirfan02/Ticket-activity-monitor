@@ -2,6 +2,7 @@
 const PDFDocument = require('pdfkit');
 const D = require('./db');
 const Q = require('./quality');
+const RS = require('./responses');
 
 // Flag thresholds: for each metric a Green, Yellow and Red range, each with an
 // optional min and max (null = no limit), editable in the dashboard and stored
@@ -122,6 +123,9 @@ async function buildReports(fromDate, toDate, options, monthKey) {
     loadCustomerExperience(fromDate, toDate, { csat: selected.includes('csat'), empathy: selected.includes('empathy') }),
   ]);
   const ratings = cxList(cx.ratings), empathyRows = cxList(cx.empathyRows);
+  // reply times (working hours) from response_events; null -> fall back to the older daily figures
+  const respEvents = await D.getResponseEventsRange(fromDate, toDate).catch(e => {
+    if (!/schema cache/.test(e.message)) console.error('reply times:', e.message); return null; });
 
   const weeks = weeksOfRange(fromDate, toDate);
   const range = monthKey ? undefined : { from: fromDate, to: toDate };
@@ -148,14 +152,16 @@ async function buildReports(fromDate, toDate, options, monthKey) {
       const wSla   = a.sla.filter(s => w.days.includes(s.stat_date));
       const newT = sum(wStats,'new_tickets'), res = sum(wStats,'resolved'), cl = sum(wStats,'closed');
       const due = sum(wSla,'total_due'), br = sum(wSla,'breached');
-      const avgResp = avg(wStats, 'avg_response_min');
-      const firstReply = avg(wStats, 'first_reply_min');
+      const wResp = respEvents ? RS.responseTotals(respEvents.filter(e => e.agent_email === email && w.days.includes(e.reply_date))) : null;
+      const avgResp = wResp ? wResp.avgResponseMin : avg(wStats, 'avg_response_min');
+      const firstReply = wResp ? wResp.firstReplyMin : avg(wStats, 'first_reply_min');
       // custom statuses for the week
       const custom = {};
       for (const s of wStats) for (const [k,v] of Object.entries(s.custom_counts||{})) custom[k]=(custom[k]||0)+(+v||0);
       return {
         label: w.label, newTickets:newT, resolved:res, closed:cl,
         avgResponseMin: avgResp, firstReplyMin: firstReply,
+        responses: wResp?.responses ?? null, firstReplies: wResp?.firstReplies ?? null,
         slaDue: due, slaBreached: br,
         slaBreachPct: due ? +((br/due)*100).toFixed(1) : 0,
         custom,
@@ -167,8 +173,9 @@ async function buildReports(fromDate, toDate, options, monthKey) {
     const totClosed   = sum(a.stats,'closed');
     const totDue = sum(a.sla,'total_due'), totBreach = sum(a.sla,'breached');
     const slaBreachPct = totDue ? +((totBreach/totDue)*100).toFixed(1) : 0;
-    const avgResp = avg(a.stats,'avg_response_min');
-    const firstReply = avg(a.stats,'first_reply_min');
+    const resp = respEvents ? RS.responseTotals(respEvents.filter(e => e.agent_email === email)) : null;
+    const avgResp = resp ? resp.avgResponseMin : avg(a.stats,'avg_response_min');
+    const firstReply = resp ? resp.firstReplyMin : avg(a.stats,'first_reply_min');
     const lateDays = a.late.length;
     const offBreaks = a.breaks.length;
     const customTotals = {};
@@ -221,6 +228,7 @@ async function buildReports(fromDate, toDate, options, monthKey) {
       totals: {
         resolved: totResolved, closed: totClosed,
         avgResponseMin: avgResp, firstReplyMin: firstReply,
+        responses: resp?.responses ?? null, firstReplies: resp?.firstReplies ?? null,
         slaDue: totDue, slaBreached: totBreach, slaBreachPct,
         lateShifts: lateDays, offBreaks, missedShifts: missedCount,
         custom: customTotals,
@@ -239,6 +247,9 @@ async function buildReports(fromDate, toDate, options, monthKey) {
     resolved: teamAgg.agents ? +(teamAgg.resolved/teamAgg.agents).toFixed(1) : 0,
     closed: teamAgg.agents ? +(teamAgg.closed/teamAgg.agents).toFixed(1) : 0,
     avgResponseMin: teamAgg.avgRespN ? +(teamAgg.avgRespSum/teamAgg.avgRespN).toFixed(1) : 0,
+    // weighted over every reply by tracked agents (working hours)
+    ...(respEvents ? (() => { const t = RS.responseTotals(respEvents.filter(e => tracked.has(e.agent_email)));
+      return { avgResponseMin: t.avgResponseMin, firstReplyMin: t.firstReplyMin, responses: t.responses, firstReplies: t.firstReplies }; })() : {}),
     csat: ratings ? Q.csatTotals(ratings.filter(r => tracked.has(r.email))) : null,
     empathy: empathyRows ? Q.empathyTotals(empathyRows.filter(r => tracked.has(r.agent_email))) : null,
   };
@@ -648,10 +659,15 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
     const avgT = (k) => { const v = agents.map(r => +r.totals?.[k] || 0).filter(n => n > 0); return v.length ? +(v.reduce((s, n) => s + n, 0) / v.length).toFixed(1) : 0; };
 
     // ── Team totals ──
+    // reply times: weighted over all replies when the payloads carry reply counts
+    // (working-hours reply events); older payloads fall back to averaging agents.
+    const ta0 = agents[0]?.teamAvg || {};
+    const weighted = ta0.responses != null;
     const team = {
       resolved:sumT('resolved'), closed:sumT('closed'),
       newTickets:agents.reduce((s, r) => s + (r.weekly || []).reduce((ws, w) => ws + (+w.newTickets || 0), 0), 0),
-      avgResponseMin:avgT('avgResponseMin'), firstReplyMin:avgT('firstReplyMin'),
+      avgResponseMin: weighted ? ta0.avgResponseMin : avgT('avgResponseMin'),
+      firstReplyMin: weighted ? ta0.firstReplyMin : avgT('firstReplyMin'),
       slaDue:sumT('slaDue'), slaBreached:sumT('slaBreached'),
       lateShifts:sumT('lateShifts'), offBreaks:sumT('offBreaks'),
     };
@@ -710,8 +726,10 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       cards.push({ label:'Resolved', value:String(team.resolved), sub:`${fmtNum(team.resolved / (agents.length || 1))} per agent` });
       cards.push({ label:'Closed', value:String(team.closed), sub:`${fmtNum(team.closed / (agents.length || 1))} per agent` });
     }
-    if (inc('avg_response')) cards.push({ label:'Avg response', value:fmtMin(team.avgResponseMin), sub:'average across agents', flag:teamFlags.avg_response });
-    if (inc('first_reply'))  cards.push({ label:'Avg first reply', value:fmtMin(team.firstReplyMin), sub:'average across agents' });
+    if (inc('avg_response')) cards.push({ label:'Avg response', value:fmtMin(team.avgResponseMin),
+      sub: weighted ? `${ta0.responses} replies · working hours` : 'average across agents', flag:teamFlags.avg_response });
+    if (inc('first_reply'))  cards.push({ label:'Avg first reply', value:fmtMin(team.firstReplyMin),
+      sub: weighted ? `${ta0.firstReplies} tickets · working hours` : 'average across agents' });
     if (inc('sla'))          cards.push({ label:'Response-SLA breach', value:`${team.slaBreachPct}%`, sub:`${team.slaBreached} of ${team.slaDue} due`, flag:teamFlags.sla_breach_pct });
     if (inc('late_shifts'))  cards.push({ label:'Late shifts', value:String(team.lateShifts), sub:`${countFlag('late_shifts', 'red')} agents flagged red` });
     if (inc('off_breaks'))   cards.push({ label:'Off-schedule breaks', value:String(team.offBreaks), sub:`${countFlag('off_breaks', 'red')} agents flagged red` });
@@ -784,12 +802,20 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       for (let i = 0; i < weekCount; i++) {
         const ws = agents.map(r => r.weekly?.[i]).filter(Boolean);
         const sumW = (k) => ws.reduce((s, w) => s + (+w[k] || 0), 0);
-        const avgW = (k) => { const v = ws.map(w => +w[k] || 0).filter(n => n > 0); return v.length ? v.reduce((s, n) => s + n, 0) / v.length : 0; };
+        // weighted by each agent's reply count for the week when available
+        const avgW = (k) => {
+          const countKey = k === 'firstReplyMin' ? 'firstReplies' : 'responses';
+          if (ws.every(w => w[countKey] != null)) {
+            const n = ws.reduce((s, w) => s + w[countKey], 0);
+            return n ? ws.reduce((s, w) => s + (+w[k] || 0) * w[countKey], 0) / n : 0;
+          }
+          const v = ws.map(w => +w[k] || 0).filter(x => x > 0); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : 0;
+        };
         const due = sumW('slaDue'), br = sumW('slaBreached');
         weeks.push([weekLabel(ws[0]?.label), String(sumW('newTickets')), String(sumW('resolved')), String(sumW('closed')),
           fmtMin(avgW('avgResponseMin')), fmtMin(avgW('firstReplyMin')), due ? `${+((br / due) * 100).toFixed(1)}%` : '–']);
       }
-      sectionTitle('Weekly team breakdown', 'Totals across all agents; times averaged', (weeks.length + 2) * ROW_H);
+      sectionTitle('Weekly team breakdown', weighted ? 'Totals across all agents; reply times over all replies, working hours' : 'Totals across all agents; times averaged', (weeks.length + 2) * ROW_H);
       drawTable([
         { label:'Week', width:W - 398 },
         { label:'New', width:52, align:'right' }, { label:'Resolved', width:64, align:'right' },
@@ -929,7 +955,22 @@ async function buildGroupReports(fromDate, toDate) {
   })).filter(g => groupActivity(g.totals))
     // busiest first; "No group" last
     .sort((a, b) => (!a.id) - (!b.id) || (b.totals.resolved + b.totals.closed) - (a.totals.resolved + a.totals.closed));
-  return { from:fromDate, to:toDate, dataFrom, groups:out, totals:finishGroupAcc(all), cx };
+  // Reply times from response_events (working hours, weighted) replace the
+  // daily-stat estimates wherever reply events exist for the period.
+  const respEvents = await D.getResponseEventsRange(fromDate, toDate).catch(() => null);
+  const totals = finishGroupAcc(all);
+  if (respEvents) {
+    const trackedEv = respEvents.filter(e => names[e.agent_email]);
+    const apply = (target, evs) => { const t = RS.responseTotals(evs); target.avgResponseMin = t.avgResponseMin; target.firstReplyMin = t.firstReplyMin; };
+    for (const g of out) {
+      const ge = trackedEv.filter(e => (+e.group_id || 0) === (+g.id || 0));
+      apply(g.totals, ge);
+      for (const a of g.agents) apply(a, ge.filter(e => e.agent_email === a.email));
+      for (const w of g.weekly) { const days = new Set(weeks.find(x => x.label === w.label)?.days || []); apply(w, ge.filter(e => days.has(e.reply_date))); }
+    }
+    apply(totals, trackedEv);
+  }
+  return { from:fromDate, to:toDate, dataFrom, groups:out, totals, cx };
 }
 
 // Shared page layout for the group PDF: header band, section titles, callouts,

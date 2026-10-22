@@ -11,6 +11,7 @@ const A        = require('./attendance');
 const E        = require('./empathy');
 const T        = require('./ticket-thread');
 const Q        = require('./quality');
+const RS       = require('./responses');
 
 const app = express();
 app.use(express.json());
@@ -569,9 +570,40 @@ async function runPoll() {
 
   // Last activity = the agent's own latest reply/note on any ticket.
   let activity = null;
-  try { activity = await scanAgentActivity(tickets, id2email); }
+  const replyEvents = [];
+  try { activity = await scanAgentActivity(tickets, id2email, replyEvents); }
   catch (e) { console.error('agent activity:', e.message); }
   for (const email of Object.keys(metrics)) metrics[email].lastSeen = activity ? (activity[email] || 0) : metrics[email].ticketSeen;
+
+  // Reply times in working hours (api/responses.js): store the replies found in
+  // the conversations just read, then take each agent's averages over their
+  // current 24h window from the stored replies. respByEmail stays null if the
+  // response_events table isn't set up, and the older estimate is used instead.
+  let respByEmail = null, respEventsByEmail = {};
+  try {
+    const emails = Object.keys(metrics);
+    const pending = await D.getResponseEventsMissingWorking().catch(() => []);   // shifts were unavailable earlier
+    // only recent replies; older history is filled in by the one-off recalculation script
+    const toTime = [...replyEvents.filter(e => Date.parse(e.replied_at) >= now - 35*86400000), ...pending];
+    if (toTime.length) {
+      const earliest = Math.max(Math.min(...toTime.map(e => Date.parse(e.wait_start))), now - 60*86400000);
+      const shifts = await cachedShifts(new Date(earliest - 86400000).toISOString().slice(0, 10), emails).catch(e => {
+        console.warn('[Deputy] shifts for reply times:', e.message); return null; });
+      // without shifts, only add new replies so earlier calculated times aren't wiped
+      await D.upsertResponseEvents(RS.timeEvents(toTime.map(({ wait_calendar_min, wait_working_min, reply_date, ...e }) => e), shifts),
+        { onlyNew: !shifts });
+    }
+    const sinceMs = Math.min(...emails.map(e => windowStart[e] || now - 24*3600000));
+    const recent = await D.getResponseEventsSince(new Date(sinceMs).toISOString());
+    respByEmail = {};
+    for (const email of emails) {
+      respEventsByEmail[email] = recent.filter(e => e.agent_email === email && Date.parse(e.replied_at) >= (windowStart[email] || now - 24*3600000));
+      respByEmail[email] = RS.responseTotals(respEventsByEmail[email]);
+    }
+  } catch (e) { if (!/schema cache/.test(e.message)) console.error('reply times:', e.message); respByEmail = null; }
+  const respAvg = (email, m) => respByEmail
+    ? { avg: respByEmail[email].avgResponseMin, first: respByEmail[email].firstReplyMin }
+    : { avg: m.respCount ? +(m.respSum/m.respCount).toFixed(1) : 0, first: m.frCount ? +(m.frSum/m.frCount).toFixed(1) : 0 };
 
   // Apply overdue-log changes in parallel (only the rows that actually changed).
   await Promise.all([
@@ -661,8 +693,8 @@ async function runPoll() {
       await D.upsertDailyStats({
         agent_email: email, stat_date: statDate, window_start: new Date(winStart).toISOString(),
         new_tickets: m.newTickets, resolved: m.resolved, closed: m.closed,
-        avg_response_min: m.respCount?+(m.respSum/m.respCount).toFixed(1):0,
-        first_reply_min: m.frCount?+(m.frSum/m.frCount).toFixed(1):0,
+        avg_response_min: respAvg(email, m).avg,
+        first_reply_min: respAvg(email, m).first,
         response_due: m.responseDue, custom_counts: m.custom, updated_at: new Date().toISOString(),
       });
     } catch (e) { console.error('upsertStats:', e.message); }
@@ -677,12 +709,21 @@ async function runPoll() {
 
     // Persist the same day's stats split by ticket group
     try {
-      const rows = Object.entries(groupMetrics[email] || {}).map(([gid, gm]) => ({
-        agent_email: email, group_id: +gid, group_name: +gid ? (groupNames[gid] || `Group ${gid}`) : 'No group',
-        stat_date: statDate, new_tickets: gm.newTickets, resolved: gm.resolved, closed: gm.closed,
-        resp_sum_min: +gm.respSum.toFixed(1), resp_count: gm.respCount, fr_sum_min: +gm.frSum.toFixed(1), fr_count: gm.frCount,
-        sla_due: gm.slaDue, sla_breached: gm.slaBreached, overdue: gm.overdue, updated_at: new Date().toISOString(),
-      }));
+      // reply times per group come from this agent's reply events in the window
+      const evs = respByEmail ? respEventsByEmail[email] : null;
+      const byGroup = { ...(groupMetrics[email] || {}) };
+      if (evs) for (const e of evs) byGroup[e.group_id || 0] = byGroup[e.group_id || 0] || groupBucket(email, e.group_id);
+      const rows = Object.entries(byGroup).map(([gid, gm]) => {
+        const ge = evs ? evs.filter(e => (e.group_id || 0) === +gid && e.wait_working_min != null) : null;
+        const sum = (xs) => +xs.reduce((s, e) => s + +e.wait_working_min, 0).toFixed(1);
+        return {
+          agent_email: email, group_id: +gid, group_name: +gid ? (groupNames[gid] || `Group ${gid}`) : 'No group',
+          stat_date: statDate, new_tickets: gm.newTickets, resolved: gm.resolved, closed: gm.closed,
+          resp_sum_min: ge ? sum(ge) : +gm.respSum.toFixed(1), resp_count: ge ? ge.length : gm.respCount,
+          fr_sum_min: ge ? sum(ge.filter(e => e.is_first)) : +gm.frSum.toFixed(1), fr_count: ge ? ge.filter(e => e.is_first).length : gm.frCount,
+          sla_due: gm.slaDue, sla_breached: gm.slaBreached, overdue: gm.overdue, updated_at: new Date().toISOString(),
+        };
+      });
       await D.replaceGroupStats(email, statDate, rows);
     } catch (e) { console.error('group stats:', e.message); }
 
@@ -766,8 +807,10 @@ async function runPoll() {
       lastSeen, idleMinutes: idleMs!=null?Math.floor(idleMs/60000):null, windowStart: winStart,
       stats: {
         newTickets:m.newTickets, resolved:m.resolved, closed:m.closed,
-        avgResponseMin: m.respCount?+(m.respSum/m.respCount).toFixed(1):0,
-        firstReplyMin: m.frCount?+(m.frSum/m.frCount).toFixed(1):0,
+        avgResponseMin: respAvg(email, m).avg,
+        firstReplyMin: respAvg(email, m).first,
+        responses: respByEmail ? respByEmail[email].responses : null,
+        firstReplies: respByEmail ? respByEmail[email].firstReplies : null,
         responseDue: m.responseDue, custom: m.custom,
       },
     });
@@ -775,6 +818,17 @@ async function runPoll() {
 
   mem.lastChecked = new Date().toISOString();
   return { agents: results, empathyCandidates };
+}
+
+// Deputy roster shifts per agent from `fromDate` to tomorrow, cached for 30 min
+// (reply times are measured in the replying agent's working hours).
+async function cachedShifts(fromDate, emails) {
+  const c = mem.shiftCache;
+  if (c && c.fromDate <= fromDate && Date.now() - c.at < SCHED_TTL && emails.every(e => c.data[e])) return c.data;
+  const to = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const data = await RS.fetchShifts(fromDate, to, emails);
+  mem.shiftCache = { fromDate, at: Date.now(), data };
+  return data;
 }
 
 // ── AGENT ACTIVITY: the agent's own replies and notes, on any ticket ──
@@ -786,7 +840,7 @@ async function runPoll() {
 // low; the rest are picked up next poll. Returns email -> last activity (ms),
 // or null when the tables aren't set up (the caller then falls back).
 const ACTIVITY_MAX_PER_POLL = 20, ACTIVITY_MIN_RATE_LEFT = 150;
-async function scanAgentActivity(tickets, id2email) {
+async function scanAgentActivity(tickets, id2email, replyEvents = []) {
   let scanned;
   try { scanned = await D.getTicketScans(tickets.map(t => t.id)); }
   catch (e) { if (/schema cache/.test(e.message)) return null; throw e; }
@@ -802,6 +856,8 @@ async function scanAgentActivity(tickets, id2email) {
     let low = false;
     for (const { t, convs, left, err } of batch) {
       if (err) { if (err.response?.status === 429) low = true; continue; }   // retried next poll
+      // reply-time events from the same conversations (api/responses.js)
+      replyEvents.push(...RS.extractReplyEvents(t, convs, id2email));
       for (const c of convs) {
         const email = !c.incoming && id2email[c.user_id];
         if (!email) continue;
@@ -995,13 +1051,18 @@ app.get('/api/history', authMw, async (req,res)=>{
         const d = byDay[r.stat_date] = byDay[r.stat_date] || { date:r.stat_date, newTickets:0, resolved:0, closed:0 };
         d.newTickets += r.new_tickets||0; d.resolved += r.resolved||0; d.closed += r.closed||0;
       }
-      const agentTotals = Object.entries(byAgent).map(([email,a]) => ({
-        email, name:a.name, newTickets:a.newTickets, resolved:a.resolved, closed:a.closed,
-        responseDue:a.responseDue,
-        avgResponseMin: a.avgRespN ? +(a.avgRespSum/a.avgRespN).toFixed(1) : 0,
-        firstReplyMin: a.firstReplyN ? +(a.firstReplySum/a.firstReplyN).toFixed(1) : 0,
-        days:a.days,
-      }));
+      // reply times over the whole range from the stored replies (weighted, working hours)
+      const respEvents = await D.getResponseEventsRange(from, to).catch(() => null);
+      const agentTotals = Object.entries(byAgent).map(([email,a]) => {
+        const rt = respEvents ? RS.responseTotals(respEvents.filter(e => e.agent_email === email)) : null;
+        return {
+          email, name:a.name, newTickets:a.newTickets, resolved:a.resolved, closed:a.closed,
+          responseDue:a.responseDue,
+          avgResponseMin: rt ? rt.avgResponseMin : (a.avgRespN ? +(a.avgRespSum/a.avgRespN).toFixed(1) : 0),
+          firstReplyMin: rt ? rt.firstReplyMin : (a.firstReplyN ? +(a.firstReplySum/a.firstReplyN).toFixed(1) : 0),
+          days:a.days,
+        };
+      });
       const dayTrend = Object.values(byDay).sort((x,y)=>x.date.localeCompare(y.date));
       const breaks = await D.getBreakLogRange(from, to);
       return res.json({ ok:true, mode:'range', from, to, agent: agent||null,

@@ -314,6 +314,36 @@ async function getMissedShiftsRange(fromDate, toDate) {
   return data || [];
 }
 
+// ── RESPONSE EVENTS (one row per agent reply that answered a waiting customer) ──
+// onlyNew: insert replies not stored yet and leave existing rows untouched
+async function upsertResponseEvents(rows, { onlyNew = false } = {}) {
+  for (let i = 0; i < rows.length; i += 500) {
+    const { error } = await db().from('response_events').upsert(rows.slice(i, i + 500), { onConflict: 'ticket_id,replied_at', ignoreDuplicates: onlyNew });
+    if (error) throw new Error('upsertResponseEvents: ' + error.message);
+  }
+}
+async function pagedResponseEvents(build) {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await build(db().from('response_events').select('*')).order('replied_at').range(from, from + 999);
+    if (error) throw new Error('responseEvents: ' + error.message);
+    all.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return all;
+}
+// replies dated (DISPLAY_TZ) within an inclusive date range
+const getResponseEventsRange = (fromDate, toDate) =>
+  pagedResponseEvents(q => q.gte('reply_date', fromDate).lte('reply_date', toDate));
+// replies sent at or after a timestamp
+const getResponseEventsSince = (iso) => pagedResponseEvents(q => q.gte('replied_at', iso));
+// replies whose working-hours time couldn't be calculated yet (Deputy unavailable), max 200
+async function getResponseEventsMissingWorking() {
+  const { data, error } = await db().from('response_events').select('*').is('wait_working_min', null).limit(200);
+  if (error) throw new Error('getResponseEventsMissingWorking: ' + error.message);
+  return data || [];
+}
+
 // ── AGENT ACTIVITY (own replies/notes) ──
 // ticket_id -> updated_at (ms) at the time its conversations were last read
 async function getTicketScans(ticketIds) {
@@ -445,6 +475,7 @@ module.exports = {
   upsertMissedShift, deleteMissedShift, getMissedShiftsRange,
   getEmpathyResolvedAt, upsertEmpathyCheck, getEmpathyRange,
   getTicketScans, upsertTicketScans, getAgentActivity, upsertAgentActivity,
+  upsertResponseEvents, getResponseEventsRange, getResponseEventsSince, getResponseEventsMissingWorking,
   getThresholds, setThreshold, setThresholdRanges,
   saveReport, getReports, getReportMonths,
 };

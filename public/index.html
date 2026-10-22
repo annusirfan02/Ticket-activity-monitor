@@ -179,23 +179,8 @@ tr:hover td{background:rgba(255,255,255,.015)}
       </div>
     </div>
 
-    <div class="stats">
-      <div class="stat clickable" onclick="filterStat('all')"><div class="stat-lbl">Agents</div><div class="stat-val" id="sTotal">—</div><div class="stat-sub">Monitored ›</div></div>
-      <div class="stat clickable" onclick="filterStat('active')"><div class="stat-lbl">Active</div><div class="stat-val g" id="sActive">—</div><div class="stat-sub">Working ›</div></div>
-      <div class="stat clickable" onclick="filterStat('alert')"><div class="stat-lbl">Alert</div><div class="stat-val r" id="sAlert">—</div><div class="stat-sub">Idle on-shift ›</div></div>
-      <div class="stat clickable" onclick="filterStat('break')"><div class="stat-lbl">On Break</div><div class="stat-val p" id="sBreak">—</div><div class="stat-sub">Button pressed ›</div></div>
-      <div class="stat clickable" onclick="filterStat('break-late')"><div class="stat-lbl">Late Break</div><div class="stat-val o" id="sLate">—</div><div class="stat-sub">Off-schedule ›</div></div>
-      <div class="stat clickable" onclick="filterStat('off-shift')"><div class="stat-lbl">Off Shift</div><div class="stat-val b" id="sOff">—</div><div class="stat-sub">Not tracking ›</div></div>
-    </div>
-
-    <div class="filter-banner" id="filterBanner">
-      <span id="filterText"></span>
-      <span class="x" onclick="clearFilter()">✕ clear</span>
-    </div>
-
     <div class="tabs">
-      <div class="tab active" data-tab="status" onclick="switchTab('status')">Live Status</div>
-      <div class="tab" data-tab="stats" onclick="switchTab('stats')">Ticket Stats</div>
+      <div class="tab active" data-tab="stats" onclick="switchTab('stats')">Ticket Stats</div>
       <div class="tab" data-tab="overdue" onclick="switchTab('overdue')">Overdue Tickets</div>
       <div class="tab" data-tab="breaks" onclick="switchTab('breaks')">Break Compliance</div>
       <div class="tab" data-tab="agents" onclick="switchTab('agents')">Manage Agents</div>
@@ -206,19 +191,8 @@ tr:hover td{background:rgba(255,255,255,.015)}
 
     </div>
 
-    <!-- STATUS -->
-    <div id="tab-status">
-      <div class="panel">
-        <div class="panel-head"><div class="panel-title">Live Agent Status</div></div>
-        <div class="tbl-scroll"><table>
-          <thead><tr><th>Agent</th><th>Status</th><th>Shift (PST)</th><th>Last Activity</th><th>Idle</th></tr></thead>
-          <tbody id="statusBody"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
-        </table></div>
-      </div>
-    </div>
-
     <!-- STATS -->
-    <div id="tab-stats" class="hidden">
+    <div id="tab-stats">
       <div class="panel">
         <div class="panel-head"><div class="panel-title">Per-Agent Ticket Stats — New / Resolved / Closed are 24h window; custom statuses are current totals (A2P approval stays 24h)</div></div>
         <div class="tbl-scroll"><table>
@@ -476,9 +450,7 @@ let cfg = { threshold:30, pollMins:5, tz:'America/Los_Angeles' };
 // every time on the dashboard is shown in the server's DISPLAY_TZ, like the shift times
 const dashTZ = () => cfg.tz || 'America/Los_Angeles';
 let countdownTimer=null, nextAt=null;
-let cachedAgents = [];     // from /api/status (live)
 let dbAgents = [];         // from /api/agents (managed list)
-let statFilter = 'all';    // Live Status filter
 let histChart = null;      // Chart.js instance
 let fdStatuses = [];       // available Freshdesk statuses (choice id + label)
 let trackedStatuses = [];  // currently tracked statuses (from /api/statuses)
@@ -510,10 +482,8 @@ async function init(){
 // data on screen (just the cards shimmer) so they don't blank every 5 min.
 let firstStatusLoad=true;
 function setLoading(on){
-  document.querySelectorAll('.stats .stat').forEach(el=>el.classList.toggle('loading',on));
   if(on && firstStatusLoad){
     const sk='<tr><td colspan="9"><div class="skel skel-bar"></div><div class="skel skel-bar" style="width:55%"></div><div class="skel skel-bar" style="width:70%"></div></td></tr>';
-    const sb=document.getElementById('statusBody'); if(sb)sb.innerHTML=sk;
     const tb=document.getElementById('statsBody');  if(tb)tb.innerHTML=sk;
   }
 }
@@ -522,15 +492,8 @@ async function loadStatus(){
   try{
     hideErr();
     const r=await authFetch('/api/status'); const d=await r.json(); if(!d.ok)throw new Error(d.error);
-    cachedAgents=d.agents;
-    document.getElementById('sTotal').textContent=d.stats.total;
-    document.getElementById('sActive').textContent=d.stats.active;
-    document.getElementById('sAlert').textContent=d.stats.alert;
-    document.getElementById('sBreak').textContent=d.stats.onBreak;
-    document.getElementById('sLate').textContent=d.stats.lateBreak;
-    document.getElementById('sOff').textContent=d.stats.offShift;
     document.getElementById('lastChk').textContent=d.lastChecked?'Checked '+new Date(d.lastChecked).toLocaleTimeString('en-US',{hour12:true,timeZone:dashTZ()}):'—';
-    renderStatus(d.agents); renderStats(d.agents); renderBreaks(d.breakIssues);
+    renderStats(d.agents); renderBreaks(d.breakIssues);
     fillOverdueAgentDropdown(d.agents);
     firstStatusLoad=false;
   }catch(e){ showErr('Error: '+e.message); }
@@ -542,53 +505,6 @@ async function pollNow(){
   try{ await authFetch('/api/poll',{method:'POST'}); toast('✓ Checked','ok'); await loadStatus(); resetCountdown(); }
   catch(e){ toast('Error: '+e.message,'err'); }
   finally{ b.disabled=false; b.textContent='⟳ Check Now'; }
-}
-
-// RENDER STATUS
-function renderStatus(agents){
-  const tb=document.getElementById('statusBody');
-  if(!agents?.length){tb.innerHTML='<tr><td colspan="5" class="empty">No agents — add some in Manage Agents</td></tr>';return;}
-  // apply active stat filter
-  let list = agents;
-  if (statFilter && statFilter!=='all') {
-    list = agents.filter(a => statFilter==='break'
-      ? a.onBreak
-      : statFilter==='break-late'
-      ? a.flaggedLate
-      : a.status===statFilter);
-  }
-  if(!list.length){tb.innerHTML='<tr><td colspan="5" class="empty">No agents in this category right now</td></tr>';return;}
-  const order={alert:0,'break-late':1,idle:2,active:3,break:4,'off-shift':5};
-  const sorted=[...list].sort((a,b)=>(order[a.status]??9)-(order[b.status]??9));
-  tb.innerHTML=sorted.map(a=>{
-    const init=(a.name||'?').split(' ').map(w=>w[0]||'').join('').slice(0,2).toUpperCase();
-    let bC,bL;
-    if(a.status==='alert'){bC='alert';bL='ALERT';}
-    else if(a.status==='break-late'){bC='breaklate';bL='BREAK (LATE)';}
-    else if(a.status==='idle'){bC='idle';bL='IDLE';}
-    else if(a.status==='break'){bC='break';bL='ON BREAK';}
-    else if(a.offDayTracking){bC='off';bL='OFF DAY (tracking)';}
-    else if(a.status==='off-shift'){bC='off';bL='OFF SHIFT';}
-    else{bC='active';bL='ACTIVE';}
-    let shiftHtml=a.shift?`${fmtTs(a.shift.startTs)} – ${fmtTs(a.shift.endTs)}`:esc(a.reason||'—');
-    if(a.onBreak){const ps=a.breakStartTs?fmtTs(a.breakStartTs):'';shiftHtml+=`<div style="color:var(--purple);font-size:10px;margin-top:2px;font-family:var(--mono)">☕ since ${ps}${a.flaggedLate?` (${a.lateMin>0?'+':''}${a.lateMin}m off)`:''}</div>`;}
-    let idleHtml;
-    if(a.onBreak)idleHtml='<span style="color:var(--purple);font-family:var(--mono);font-size:11px">paused</span>';
-    else if(!a.monitor)idleHtml='<span class="idle-off">—</span>';
-    else if(a.idleMinutes==null)idleHtml='<span class="idle-bad">No activity</span>';
-    else if(a.status==='alert')idleHtml=`<span class="idle-bad">${a.idleMinutes}m</span>`;
-    else if(a.status==='idle')idleHtml=`<span class="idle-warn">${a.idleMinutes}m</span>`;
-    else idleHtml=`<span class="idle-ok">${a.idleMinutes}m</span>`;
-    // last own reply/note; one from before the current shift isn't shown as shift activity
-    const lastFmt=(ts,withDay)=>new Date(ts).toLocaleString('en-US',{hour12:true,hour:'2-digit',minute:'2-digit',timeZone:dashTZ(),...(withDay?{month:'short',day:'numeric'}:{})});
-    const beforeShift=a.monitor&&a.shift&&(!a.lastSeen||a.lastSeen<a.shift.startTs);
-    const sameDay=a.lastSeen&&new Date(a.lastSeen).toLocaleDateString('en-US',{timeZone:dashTZ()})===new Date().toLocaleDateString('en-US',{timeZone:dashTZ()});
-    const last=beforeShift
-      ? `<span class="idle-bad">No activity this shift</span><div style="color:var(--dim);font-size:10px;margin-top:2px">${a.lastSeen?'last: '+lastFmt(a.lastSeen,!sameDay):'no recent reply'}</div>`
-      : a.lastSeen?lastFmt(a.lastSeen,!sameDay):'—';
-    return `<tr><td><div class="ac"><div class="av">${esc(init)}</div><div><div class="an">${esc(a.name)}</div><div class="ae">${esc(a.email)}</div></div></div></td>
-      <td><span class="badge ${bC}">${bL}</span></td><td class="mono">${shiftHtml}</td><td class="mono">${last}</td><td>${idleHtml}</td></tr>`;
-  }).join('');
 }
 
 // RENDER STATS
@@ -779,24 +695,10 @@ async function delStatus(id){
   catch(e){ toast('Error: '+e.message,'err'); }
 }
 
-// STAT FILTER (clickable boxes)
-const STAT_LABELS={all:'All agents',active:'Active agents',alert:'Alert — idle on shift',break:'On break',['break-late']:'Late / off-schedule break',['off-shift']:'Off shift'};
-function filterStat(s){
-  statFilter=s;
-  switchTab('status');
-  const banner=document.getElementById('filterBanner');
-  if(s==='all'){banner.style.display='none';}
-  else{banner.style.display='flex';document.getElementById('filterText').textContent='Showing: '+(STAT_LABELS[s]||s);}
-  renderStatus(cachedAgents);
-  // highlight active box
-  document.querySelectorAll('.stat.clickable').forEach(el=>el.style.borderColor='');
-}
-function clearFilter(){ statFilter='all'; document.getElementById('filterBanner').style.display='none'; renderStatus(cachedAgents); }
-
 // TABS
 function switchTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.dataset.tab===t));
-  ['status','stats','overdue','breaks','agents','statuses','history','reports','quality'].forEach(n=>document.getElementById('tab-'+n).classList.toggle('hidden',n!==t));
+  ['stats','overdue','breaks','agents','statuses','history','reports','quality'].forEach(n=>document.getElementById('tab-'+n).classList.toggle('hidden',n!==t));
   if(t==='quality') qOpen();
 
   if(t==='overdue')loadOverdue();

@@ -969,21 +969,18 @@ app.post('/api/login', (req,res)=>{
 });
 function authMw(req,res,next){ const t=req.headers['x-auth-token']; if(verifyTok(t))return next(); res.status(401).json({ok:false,error:'Unauthorized'}); }
 
+const liveCounts = a => ({
+  total:a.length, active:a.filter(x=>x.status==='active').length,
+  alert:a.filter(x=>x.status==='alert').length, onBreak:a.filter(x=>x.onBreak).length,
+  lateBreak:a.filter(x=>x.flaggedLate).length, offShift:a.filter(x=>x.status==='off-shift').length,
+});
 app.get('/api/status', authMw, async (req,res)=>{
   try {
     const r = await runPoll();
     const a = r.agents;
     const today = new Date().toISOString().split('T')[0];
     const breakIssues = await D.getBreakLog(today);
-    res.json({
-      ok:true, lastChecked: mem.lastChecked, threshold: THRESHOLD_MIN, pollMins: POLL_MIN,
-      stats: {
-        total:a.length, active:a.filter(x=>x.status==='active').length,
-        alert:a.filter(x=>x.status==='alert').length, onBreak:a.filter(x=>x.onBreak).length,
-        lateBreak:a.filter(x=>x.flaggedLate).length, offShift:a.filter(x=>x.status==='off-shift').length,
-      },
-      agents:a, breakIssues,
-    });
+    res.json({ ok:true, lastChecked: mem.lastChecked, threshold: THRESHOLD_MIN, pollMins: POLL_MIN, stats: liveCounts(a), agents:a, breakIssues });
   } catch(e){ console.error(e.message); res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -1292,9 +1289,20 @@ function hourlyMw(req,res,next){
   }
   res.status(401).json({ok:false,error:'Unauthorized'});
 }
-app.get('/hourly', (req,res)=>{
+// /live (Live Status) is unlinked too and uses the same password and token.
+for (const page of ['hourly', 'live']) app.get('/' + page, (req,res)=>{
   res.set({ 'X-Robots-Tag':'noindex, nofollow', 'Cache-Control':'no-store', 'Referrer-Policy':'no-referrer' });
-  res.sendFile(path.join(__dirname, '../views/hourly.html'));
+  res.sendFile(path.join(__dirname, `../views/${page}.html`));
+});
+app.get('/api/live/status', hourlyMw, async (req,res)=>{
+  try {
+    const a = (await runPoll()).agents;
+    // only what the live table shows (no ticket stats)
+    const agents = a.map(x => ({ name:x.name, email:x.email, status:x.status, monitor:x.monitor, shift:x.shift, reason:x.reason,
+      onBreak:x.onBreak, breakStartTs:x.breakStartTs, flaggedLate:x.flaggedLate, lateMin:x.lateMin, offDayTracking:x.offDayTracking,
+      idleMinutes:x.idleMinutes, lastSeen:x.lastSeen }));
+    res.json({ ok:true, lastChecked: mem.lastChecked, stats: liveCounts(a), agents });
+  } catch(e){ console.error('live:', e.message); res.status(500).json({ok:false,error:e.message}); }
 });
 app.post('/api/hourly/login', async (req,res)=>{
   const pw = process.env.HOURLY_PASSWORD;

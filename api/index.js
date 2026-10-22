@@ -12,6 +12,7 @@ const E        = require('./empathy');
 const T        = require('./ticket-thread');
 const Q        = require('./quality');
 const RS       = require('./responses');
+const HR       = require('./hourly');
 
 const app = express();
 app.use(express.json());
@@ -816,8 +817,31 @@ async function runPoll() {
     });
   }
 
+  try { await takeOpenSnapshots(agents, id2email); }
+  catch (e) { if (!/schema cache/.test(e.message)) console.error('open snapshots:', e.message); }
+
   mem.lastChecked = new Date().toISOString();
   return { agents: results, empathyCandidates };
+}
+
+// Hourly snapshot for the Hourly tab: at the first poll of each hour, count each
+// tracked agent's tickets in Open status (Freshdesk status 2). Skips agents
+// already recorded for this hour, so overlapping polls don't repeat the calls.
+async function takeOpenSnapshots(agents, id2email) {
+  const hour = new Date(Math.floor(Date.now() / 3600000) * 3600000).toISOString();
+  if (mem.snapshotHour === hour) return;
+  const have = await D.getOpenSnapshotEmails(hour);
+  const rows = [];
+  for (const a of agents) {
+    const email = id2email[a.id];
+    if (!email || have.has(email)) continue;
+    const q = encodeURIComponent(`"agent_id:${a.id} AND status:2"`);
+    const { data } = await axios.get(`${fdBase()}/search/tickets?query=${q}`, { headers: fdHeaders(), timeout: 15000 });
+    rows.push({ agent_email: email, snapshot_hour: hour, open_count: typeof data?.total === 'number' ? data.total : (data?.results?.length || 0),
+      taken_at: new Date().toISOString() });
+  }
+  await D.upsertOpenSnapshots(rows);
+  mem.snapshotHour = hour;
 }
 
 // Deputy roster shifts per agent from `fromDate` to tomorrow, cached for 30 min
@@ -1252,6 +1276,15 @@ app.get('/api/quality/csat', authMw, async (req,res)=>{
     negatives.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
     res.json({ ok:true, from:range.from, to:range.to, agents, negatives, otherAgents:other });
   } catch(e){ console.error('csat:', e.message); res.status(500).json({ok:false,error:e.message}); }
+});
+
+// ── HOURLY TAB: one agent's day hour by hour (api/hourly.js) ──
+app.get('/api/hourly', authMw, async (req,res)=>{
+  try {
+    const { date, agent } = req.query;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !agent) return res.status(400).json({ok:false,error:'date (YYYY-MM-DD) and agent required'});
+    res.json({ ok:true, ...(await HR.buildHourly(date, agent)) });
+  } catch(e){ console.error('hourly:', e.message); res.status(500).json({ok:false,error:e.message}); }
 });
 
 // ── THRESHOLDS ──

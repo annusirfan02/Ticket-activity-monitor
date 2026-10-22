@@ -254,6 +254,18 @@ create table if not exists response_events (
 create index if not exists idx_resp_date  on response_events(reply_date);
 create index if not exists idx_resp_agent on response_events(agent_email);
 
+-- ── Hourly open-ticket snapshots (Hourly tab) ──
+-- Once per hour the poll records how many tickets in Freshdesk's Open status
+-- each agent has. snapshot_hour is the hour (UTC, truncated); taken_at is when
+-- the count was read (within a few minutes after the hour).
+create table if not exists open_snapshots (
+  agent_email   text not null,
+  snapshot_hour timestamptz not null,
+  open_count    integer not null,
+  taken_at      timestamptz default now(),
+  primary key (agent_email, snapshot_hour)
+);
+
 -- ── Agent activity: latest own reply/note per agent, on any ticket ──
 -- ticket_scan remembers which ticket version was already read, so each
 -- ticket's conversations are fetched only after it changes.

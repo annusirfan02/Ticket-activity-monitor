@@ -344,6 +344,38 @@ async function getResponseEventsMissingWorking() {
   return data || [];
 }
 
+// ── OPEN-TICKET SNAPSHOTS (agent's tickets in Open status, once per hour) ──
+async function getOpenSnapshotEmails(snapshotHourIso) {
+  const { data, error } = await db().from('open_snapshots').select('agent_email').eq('snapshot_hour', snapshotHourIso);
+  if (error) throw new Error('getOpenSnapshotEmails: ' + error.message);
+  return new Set((data || []).map(r => r.agent_email));
+}
+async function upsertOpenSnapshots(rows) {
+  if (!rows.length) return;
+  const { error } = await db().from('open_snapshots').upsert(rows, { onConflict: 'agent_email,snapshot_hour' });
+  if (error) throw new Error('upsertOpenSnapshots: ' + error.message);
+}
+async function getOpenSnapshots(agentEmail, fromIso, toIso) {
+  const { data, error } = await db().from('open_snapshots').select('*').eq('agent_email', agentEmail)
+    .gte('snapshot_hour', fromIso).lte('snapshot_hour', toIso).order('snapshot_hour');
+  if (error) throw new Error('getOpenSnapshots: ' + error.message);
+  return data || [];
+}
+// idle episodes of one agent overlapping [fromIso, toIso]
+async function getIdleOverlapping(agentEmail, fromIso, toIso) {
+  const { data, error } = await db().from('idle_log').select('*').eq('agent_email', agentEmail.toLowerCase().trim())
+    .lt('idle_start', toIso).gt('idle_end', fromIso).order('idle_start');
+  if (error) throw new Error('getIdleOverlapping: ' + error.message);
+  return data || [];
+}
+// one agent's replies sent in [fromIso, toIso]
+async function getAgentResponseEvents(agentEmail, fromIso, toIso) {
+  const { data, error } = await db().from('response_events').select('*').eq('agent_email', agentEmail)
+    .gte('replied_at', fromIso).lte('replied_at', toIso).order('replied_at');
+  if (error) throw new Error('getAgentResponseEvents: ' + error.message);
+  return data || [];
+}
+
 // ── AGENT ACTIVITY (own replies/notes) ──
 // ticket_id -> updated_at (ms) at the time its conversations were last read
 async function getTicketScans(ticketIds) {
@@ -476,6 +508,7 @@ module.exports = {
   getEmpathyResolvedAt, upsertEmpathyCheck, getEmpathyRange,
   getTicketScans, upsertTicketScans, getAgentActivity, upsertAgentActivity,
   upsertResponseEvents, getResponseEventsRange, getResponseEventsSince, getResponseEventsMissingWorking,
+  getOpenSnapshotEmails, upsertOpenSnapshots, getOpenSnapshots, getIdleOverlapping, getAgentResponseEvents,
   getThresholds, setThreshold, setThresholdRanges,
   saveReport, getReports, getReportMonths,
 };

@@ -3,29 +3,42 @@ const PDFDocument = require('pdfkit');
 const D = require('./db');
 const Q = require('./quality');
 
-// Default flag thresholds (editable via dashboard → stored in DB)
+// Flag thresholds: for each metric a Green, Yellow and Red range, each with an
+// optional min and max (null = no limit), editable in the dashboard and stored
+// in report_thresholds.ranges. A value is checked against Green, then Yellow,
+// then Red (bounds inclusive); a value that fits none gets no colour.
+const R_ = (min, max) => ({ min, max });
 const DEFAULT_THRESHOLDS = {
-  late_shifts:    { green_max: 1,  yellow_max: 3 },   // days late in month
-  off_breaks:     { green_max: 1,  yellow_max: 3 },   // off-schedule breaks in month
-  avg_response:   { green_max: 15, yellow_max: 30 },  // minutes
-  sla_breach_pct: { green_max: 5,  yellow_max: 15 },  // percent
-  csat_pct:       { green_max: 90, yellow_max: 75 },  // percent positive — higher is better (green ≥ 90)
-  empathy_missed_pct: { green_max: 10, yellow_max: 25 }, // percent of upset customers
+  late_shifts:        { green: R_(0, 1),     yellow: R_(1, 3),   red: R_(3, null) },    // days late
+  off_breaks:         { green: R_(0, 1),     yellow: R_(1, 3),   red: R_(3, null) },    // off-schedule breaks
+  avg_response:       { green: R_(0, 15),    yellow: R_(15, 30), red: R_(30, null) },   // minutes
+  sla_breach_pct:     { green: R_(0, 5),     yellow: R_(5, 15),  red: R_(15, null) },   // percent
+  csat_pct:           { green: R_(90, 100),  yellow: R_(75, 90), red: R_(0, 75) },      // percent positive
+  empathy_missed_pct: { green: R_(0, 10),    yellow: R_(10, 25), red: R_(25, 100) },    // % of upset customers
 };
-// For these metrics the stored green/yellow values are minimums, not maximums.
+// Older saved settings only had green_max / yellow_max; CSAT used them as minimums.
 const HIGHER_IS_BETTER = new Set(['csat_pct']);
-
-function flagFor(metric, value, thresholds) {
-  const t = thresholds[metric] || DEFAULT_THRESHOLDS[metric];
-  if (!t) return 'green';
-  if (HIGHER_IS_BETTER.has(metric)) {
-    if (value >= t.green_max) return 'green';
-    if (value >= t.yellow_max) return 'yellow';
-    return 'red';
+function legacyRanges(metric, g, y) {
+  return HIGHER_IS_BETTER.has(metric)
+    ? { green: R_(g, null), yellow: R_(y, g), red: R_(null, y) }
+    : { green: R_(null, g), yellow: R_(g, y), red: R_(y, null) };
+}
+// report_thresholds rows -> { metric: { green, yellow, red } }, defaults filled in.
+function thresholdsFromRows(rows = []) {
+  const out = JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS));
+  for (const r of rows) {
+    if (r.ranges && typeof r.ranges === 'object') out[r.metric] = r.ranges;
+    else if (r.green_max != null && r.yellow_max != null) out[r.metric] = legacyRanges(r.metric, +r.green_max, +r.yellow_max);
   }
-  if (value <= t.green_max) return 'green';
-  if (value <= t.yellow_max) return 'yellow';
-  return 'red';
+  return out;
+}
+
+const inRange = (v, r) => r && (r.min == null || v >= r.min) && (r.max == null || v <= r.max) && (r.min != null || r.max != null);
+function flagFor(metric, value, thresholds) {
+  const t = thresholds?.[metric] || DEFAULT_THRESHOLDS[metric];
+  if (!t || value == null || Number.isNaN(+value)) return undefined;
+  for (const color of ['green', 'yellow', 'red']) if (inRange(+value, t[color])) return color;
+  return undefined;
 }
 
 /**
@@ -95,9 +108,7 @@ async function buildReports(fromDate, toDate, options, monthKey) {
   const selected = options.selected || ['resolved_closed','a2p','ghl','custom','avg_response','first_reply','sla','late_shifts','off_breaks','csat','empathy'];
 
   // thresholds
-  const thRows = await D.getThresholds();
-  const thresholds = { ...DEFAULT_THRESHOLDS };
-  for (const r of thRows) thresholds[r.metric] = { green_max: +r.green_max, yellow_max: +r.yellow_max };
+  const thresholds = thresholdsFromRows(await D.getThresholds());
 
   // pull data
   const [agents, statsRange, slaRange, lateShifts, breakLogs, missedShifts, cx] = await Promise.all([
@@ -1119,4 +1130,5 @@ function generateGroupPDF(data, { monthKey, thresholds = DEFAULT_THRESHOLDS } = 
   });
 }
 
-module.exports = { buildMonthlyReports, buildRangeReports, buildGroupReports, generatePDF, generateTeamPDF, generateGroupPDF, monthBounds, weeksOfMonth, DEFAULT_THRESHOLDS };
+module.exports = { buildMonthlyReports, buildRangeReports, buildGroupReports, generatePDF, generateTeamPDF, generateGroupPDF, monthBounds, weeksOfMonth,
+  DEFAULT_THRESHOLDS, thresholdsFromRows, flagFor };

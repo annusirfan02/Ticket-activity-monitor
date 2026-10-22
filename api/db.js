@@ -405,6 +405,12 @@ async function setThreshold(metric, greenMax, yellowMax) {
     .upsert({ metric, green_max: greenMax, yellow_max: yellowMax, updated_at: new Date().toISOString() }, { onConflict: 'metric' });
   if (error) throw new Error('setThreshold: ' + error.message);
 }
+// ranges = { green:{min,max}, yellow:{min,max}, red:{min,max} } (null = no limit)
+async function setThresholdRanges(metric, ranges) {
+  const { error } = await db().from('report_thresholds')
+    .upsert({ metric, ranges, updated_at: new Date().toISOString() }, { onConflict: 'metric' });
+  if (error) throw new Error('setThresholdRanges: ' + error.message);
+}
 
 // ── MONTHLY REPORTS ──
 async function saveReport(monthKey, agentEmail, agentName, payload) {
@@ -439,6 +445,6 @@ module.exports = {
   upsertMissedShift, deleteMissedShift, getMissedShiftsRange,
   getEmpathyResolvedAt, upsertEmpathyCheck, getEmpathyRange,
   getTicketScans, upsertTicketScans, getAgentActivity, upsertAgentActivity,
-  getThresholds, setThreshold,
+  getThresholds, setThreshold, setThresholdRanges,
   saveReport, getReports, getReportMonths,
 };

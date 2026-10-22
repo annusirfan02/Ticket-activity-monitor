@@ -387,10 +387,17 @@ tr:hover td{background:rgba(255,255,255,.015)}
 
       <!-- thresholds editor -->
       <div class="panel">
-        <div class="panel-head"><div class="panel-title">🎨 Flag Thresholds (green ≤ · yellow ≤ · else red)</div></div>
+        <div class="panel-head"><div class="panel-title">🎨 Flag Thresholds</div></div>
+        <div class="mono" style="color:var(--dim);font-size:11px;padding:8px 18px 4px;line-height:1.6">
+          Set a min and max for each colour; leave a box empty for no limit. A value is checked against Green, then Yellow,
+          then Red (limits included), so a value on a shared boundary takes the first colour. A value that fits no range is left uncoloured.
+        </div>
         <div class="tbl-scroll"><table>
-          <thead><tr><th>Metric</th><th>Green ≤</th><th>Yellow ≤</th><th></th></tr></thead>
-          <tbody id="threshBody"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>Metric</th>
+            <th style="color:#1a9d6a">Green min</th><th style="color:#1a9d6a">Green max</th>
+            <th style="color:#d99400">Yellow min</th><th style="color:#d99400">Yellow max</th>
+            <th style="color:#d6334e">Red min</th><th style="color:#d6334e">Red max</th><th></th></tr></thead>
+          <tbody id="threshBody"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
         </table></div>
       </div>
     </div>
@@ -1059,21 +1066,25 @@ async function loadThresholds(){
   const tb=document.getElementById('threshBody');
   try{
     const r=await authFetch('/api/thresholds'); const d=await r.json(); if(!d.ok)throw new Error(d.error);
-    const labels={late_shifts:'Late shifts (days/month)',off_breaks:'Off-schedule breaks',avg_response:'Avg response (min)',sla_breach_pct:'Response-SLA breach (%)',
-      csat_pct:'CSAT % — higher is better (green ≥ · yellow ≥)',empathy_missed_pct:'Empathy missed (% of upset customers)'};
+    const labels={late_shifts:'Late shifts (days)',off_breaks:'Off-schedule breaks',avg_response:'Avg response (min)',sla_breach_pct:'Response-SLA breach (%)',
+      csat_pct:'CSAT (% positive)',empathy_missed_pct:'Empathy missed (% of upset customers)'};
+    const box=(id,v)=>`<td><input type="number" step="any" id="${id}" value="${v==null?'':v}" placeholder="no limit" style="width:78px;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:4px 7px;color:var(--text);font-family:var(--mono)"/></td>`;
     tb.innerHTML=Object.entries(d.thresholds).map(([m,t])=>`<tr>
       <td>${labels[m]||m}</td>
-      <td><input type="number" id="g_${m}" value="${t.green_max}" style="width:70px;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:4px 7px;color:var(--text);font-family:var(--mono)"/></td>
-      <td><input type="number" id="y_${m}" value="${t.yellow_max}" style="width:70px;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:4px 7px;color:var(--text);font-family:var(--mono)"/></td>
+      ${['green','yellow','red'].map(c=>box(`th_${m}_${c}_min`,t[c]?.min)+box(`th_${m}_${c}_max`,t[c]?.max)).join('')}
       <td><button class="btn" onclick="saveThresh('${m}')">Save</button></td>
     </tr>`).join('');
-  }catch(e){ tb.innerHTML=`<tr><td colspan="4" class="empty">Error: ${esc(e.message)}</td></tr>`; }
+  }catch(e){ tb.innerHTML=`<tr><td colspan="8" class="empty">Error: ${esc(e.message)}</td></tr>`; }
 }
 async function saveThresh(metric){
-  const g=parseFloat(document.getElementById('g_'+metric).value);
-  const y=parseFloat(document.getElementById('y_'+metric).value);
-  try{ await authFetch('/api/thresholds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({metric,greenMax:g,yellowMax:y})}); toast('✓ Saved','ok'); }
-  catch(e){ toast('Error: '+e.message,'err'); }
+  const val=(id)=>{ const v=document.getElementById(id).value.trim(); return v===''?null:Number(v); };
+  const ranges={};
+  for(const c of ['green','yellow','red']) ranges[c]={min:val(`th_${metric}_${c}_min`),max:val(`th_${metric}_${c}_max`)};
+  try{
+    const r=await authFetch('/api/thresholds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({metric,ranges})});
+    const d=await r.json(); if(!d.ok) throw new Error(d.error);
+    toast('✓ Saved — applies to reports generated or downloaded from now on','ok');
+  }catch(e){ toast('Error: '+e.message,'err'); }
 }
 
 // COUNTDOWN

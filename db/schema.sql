@@ -143,9 +143,12 @@ create table if not exists report_thresholds (
   id              bigint generated always as identity primary key,
   metric          text unique not null, -- 'late_shifts','off_breaks','avg_response','sla_breach_pct'
   green_max       numeric,              -- <= green_max  => green
-  yellow_max      numeric,              -- <= yellow_max => yellow, else red
+  yellow_max      numeric,              -- <= yellow_max => yellow, else red (older format)
   updated_at      timestamptz default now()
 );
+-- Current format: {"green":{"min":0,"max":5},"yellow":{"min":5,"max":15},"red":{"min":15,"max":null}}
+-- (null = no limit). When set it replaces green_max / yellow_max.
+alter table report_thresholds add column if not exists ranges jsonb;
 
 -- ── Generated monthly reports (stored, downloadable anytime) ──
 create table if not exists monthly_reports (

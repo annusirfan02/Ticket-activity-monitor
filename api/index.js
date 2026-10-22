@@ -1102,8 +1102,7 @@ app.get('/api/reports/team-pdf', authMw, async (req,res)=>{
       D.getThresholds(),
     ]);
     if (!payloads.length) return res.status(404).json({ok:false,error: range ? 'No agents found' : 'No reports for this month — generate them first'});
-    const thresholds = { ...R.DEFAULT_THRESHOLDS };
-    for (const r of thRows) thresholds[r.metric] = { green_max:+r.green_max, yellow_max:+r.yellow_max };
+    const thresholds = R.thresholdsFromRows(thRows);
     const pdf = await R.generateTeamPDF(month || range.from.slice(0,7), payloads, thresholds);
     const period = range ? `${range.from}_to_${range.to}` : month;
     res.setHeader('Content-Type','application/pdf');
@@ -1122,8 +1121,7 @@ app.get('/api/reports/group-pdf', authMw, async (req,res)=>{
     if (!range && !/^\d{4}-\d{2}$/.test(month||'')) return res.status(400).json({ok:false,error:'month (or from/to) required'});
     const { fromDate, toDate } = range ? { fromDate:range.from, toDate:range.to } : R.monthBounds(month);
     const [data, thRows] = await Promise.all([R.buildGroupReports(fromDate, toDate), D.getThresholds()]);
-    const thresholds = { ...R.DEFAULT_THRESHOLDS };
-    for (const r of thRows) thresholds[r.metric] = { green_max:+r.green_max, yellow_max:+r.yellow_max };
+    const thresholds = R.thresholdsFromRows(thRows);
     const pdf = await R.generateGroupPDF(data, { monthKey: range ? null : month, thresholds });
     const period = range ? `${range.from}_to_${range.to}` : month;
     res.setHeader('Content-Type','application/pdf');
@@ -1198,15 +1196,30 @@ app.get('/api/quality/csat', authMw, async (req,res)=>{
 // ── THRESHOLDS ──
 app.get('/api/thresholds', authMw, async (req,res)=>{
   try {
-    const rows = await D.getThresholds();
-    const merged = { ...R.DEFAULT_THRESHOLDS };
-    for (const r of rows) merged[r.metric] = { green_max:+r.green_max, yellow_max:+r.yellow_max };
-    res.json({ ok:true, thresholds: merged });
+    res.json({ ok:true, thresholds: R.thresholdsFromRows(await D.getThresholds()) });
   } catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
+// body: { metric, ranges: { green:{min,max}, yellow:{min,max}, red:{min,max} } }, null = no limit
 app.post('/api/thresholds', authMw, async (req,res)=>{
-  try { const { metric, greenMax, yellowMax } = req.body; await D.setThreshold(metric, greenMax, yellowMax); res.json({ok:true}); }
-  catch(e){ res.status(500).json({ok:false,error:e.message}); }
+  try {
+    const { metric, ranges } = req.body || {};
+    if (!R.DEFAULT_THRESHOLDS[metric]) return res.status(400).json({ok:false,error:'Unknown metric'});
+    const clean = {};
+    for (const color of ['green','yellow','red']) {
+      const r = ranges?.[color] || {};
+      const num = (v) => v === '' || v == null ? null : Number(v);
+      const min = num(r.min), max = num(r.max);
+      if ([min, max].some(v => v != null && !Number.isFinite(v))) return res.status(400).json({ok:false,error:`${color}: min and max must be numbers or empty`});
+      if (min != null && max != null && min > max) return res.status(400).json({ok:false,error:`${color}: min is greater than max`});
+      clean[color] = { min, max };
+    }
+    await D.setThresholdRanges(metric, clean);
+    res.json({ok:true, ranges:clean});
+  } catch(e){
+    if (/ranges/.test(e.message) && /schema cache|column/.test(e.message))
+      return res.status(503).json({ok:false,error:'Run the report_thresholds "ranges" SQL from db/schema.sql in Supabase first'});
+    res.status(500).json({ok:false,error:e.message});
+  }
 });
 
 // ── LATE SHIFTS (live view) ──

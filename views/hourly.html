@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="robots" content="noindex, nofollow"/>
+<title>Hourly View</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+:root{
+  --bg:#0d0f14;--surface:#13161e;--card:#181c26;--border:#1f2436;
+  --accent:#00e5a0;--warn:#ffb800;--danger:#ff4d6a;--info:#4d9fff;--purple:#a064ff;
+  --muted:#2e3347;--text:#dde2f0;--dim:#636b8a;
+  --mono:'IBM Plex Mono',monospace;--sans:'IBM Plex Sans',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh}
+.lock{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:16px}
+.lock-box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:32px;width:100%;max-width:360px}
+.lock-box h2{font-size:18px;margin-bottom:6px}.lock-box p{font-size:12px;color:var(--dim);margin-bottom:20px}
+.lock-box input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:11px 13px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;margin-bottom:12px}
+.lock-box input:focus{border-color:var(--accent)}
+.err{color:var(--danger);font-size:12px;font-family:var(--mono);margin-bottom:10px;display:none}
+.wrap{max-width:1200px;margin:0 auto;padding:22px 16px}
+.btn{background:transparent;border:1px solid var(--border);color:var(--dim);border-radius:6px;padding:6px 13px;font-size:12px;font-family:var(--mono);cursor:pointer}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#0d0f14;font-weight:600;width:100%;padding:11px}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.panel-head{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:10px}
+.panel-title{font-size:11px;font-family:var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
+.switcher{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.switcher select,.switcher input{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 11px;color:var(--text);font-family:var(--mono);font-size:12px;outline:none}
+.tbl-scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:700px}
+th{text-align:left;padding:9px 14px;font-size:10px;font-family:var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border);background:rgba(255,255,255,.015);white-space:nowrap}
+td{padding:11px 14px;font-size:12px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.mono{font-family:var(--mono);font-size:11px}
+.num{font-family:var(--mono);font-size:13px;font-weight:600}
+.empty-cell{color:var(--dim);font-size:11px}
+.empty{padding:30px 16px;text-align:center;color:var(--dim);font-size:12px}
+#toast{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 16px;font-size:12px;font-family:var(--mono);opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.show{opacity:1}#toast.err{border-color:var(--danger);color:var(--danger)}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<div class="lock" id="lock">
+  <div class="lock-box">
+    <h2>Hourly View</h2>
+    <p>This page is password protected.</p>
+    <input type="password" id="pw" placeholder="Password" autocomplete="current-password"/>
+    <div class="err" id="pwErr">Wrong password</div>
+    <button class="btn primary" id="pwBtn" onclick="unlock()">Open</button>
+  </div>
+</div>
+
+<div class="wrap hidden" id="app">
+  <div class="panel">
+    <div class="panel-head">
+      <div class="panel-title">⏱ Hourly View</div>
+      <div class="switcher">
+        <input type="date" id="hrDate"/>
+        <label class="mono" style="color:var(--dim)">Agent:</label>
+        <select id="hrAgent"></select>
+        <button class="btn" onclick="hrLoad()">↻ Load</button>
+        <button class="btn" onclick="lockPage()">Lock</button>
+      </div>
+    </div>
+    <div class="mono" style="color:var(--dim);font-size:11px;padding:8px 18px 4px;line-height:1.6">
+      Each rostered shift on the chosen day, split into hours from the shift start. The last hour of every shift is not shown or counted.
+      Open tickets = the agent's tickets in Open status at the start of the hour (recorded hourly since this view went live).
+      Reply time = working hours only. Times in <span id="hrTz"></span>.
+    </div>
+    <div id="hrBody" style="padding:6px 18px 18px"><div class="empty">Pick a day and an agent, then Load</div></div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+// Separate from the dashboard login: this page has its own password (HOURLY_PASSWORD)
+// and its token only opens the hourly endpoints.
+let token = sessionStorage.getItem('hr_token') || null;
+let cfg = { tz:'America/Los_Angeles' };
+const dashTZ = () => cfg.tz || 'America/Los_Angeles';
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function toast(m,t='ok'){const el=document.getElementById('toast');el.textContent=m;el.className='show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.className=t;},3500);}
+async function authFetch(url,opts={}){ opts.headers=Object.assign({},opts.headers,{'x-hourly-token':token}); const r=await fetch(url,opts); if(r.status===401){lockPage();throw new Error('Session expired');} return r; }
+async function unlock(){
+  const b=document.getElementById('pwBtn'), err=document.getElementById('pwErr'); b.disabled=true; err.style.display='none';
+  try{
+    const r=await fetch('/api/hourly/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('pw').value})});
+    const d=await r.json(); if(!d.ok){ err.textContent=d.error||'Wrong password'; err.style.display='block'; return; }
+    token=d.token; sessionStorage.setItem('hr_token',token); showApp();
+  }catch(e){ err.textContent='Could not reach the server'; err.style.display='block'; }
+  finally{ b.disabled=false; }
+}
+function lockPage(){ token=null; sessionStorage.removeItem('hr_token'); location.reload(); }
+async function showApp(){
+  document.getElementById('lock').classList.add('hidden'); document.getElementById('app').classList.remove('hidden');
+  try{ const r=await fetch('/api/config'); cfg=await r.json(); }catch(e){}
+  hrOpen();
+}
+document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')unlock();});
+if(token) showApp();
+
+async function hrOpen(){
+  document.getElementById('hrTz').textContent=dashTZ();
+  const d=document.getElementById('hrDate');
+  if(!d.value) d.value=new Date().toLocaleDateString('en-CA',{timeZone:dashTZ()});   // today in DISPLAY_TZ
+  const sel=document.getElementById('hrAgent');
+  if(!sel.options.length){
+    try{ const r=await authFetch('/api/hourly/agents'); const j=await r.json(); if(!j.ok) throw new Error(j.error);
+      sel.innerHTML=j.agents.filter(a=>a.active!==false).map(a=>`<option value="${esc(a.email)}">${esc(a.name||a.email)}</option>`).join('');
+    }catch(e){ toast('Could not load agents: '+e.message,'err'); }
+  }
+}
+function hrTime(ms){ return new Date(ms).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:dashTZ()}); }
+function hrMins(m){ if(m==null) return '–'; m=Math.round(m); return m<60?`${m}m`:`${Math.floor(m/60)}h ${m%60}m`; }
+async function hrLoad(){
+  const date=document.getElementById('hrDate').value, agent=document.getElementById('hrAgent').value, box=document.getElementById('hrBody');
+  if(!date||!agent){ toast('Pick a day and an agent','err'); return; }
+  box.innerHTML='<div class="empty">Loading…</div>';
+  try{
+    const r=await authFetch(`/api/hourly?date=${date}&agent=${encodeURIComponent(agent)}`); const d=await r.json(); if(!d.ok) throw new Error(d.error);
+    if(!d.shifts.length){ box.innerHTML=`<div class="empty">${esc(d.note||'No rostered shift on this date')}</div>`; return; }
+    box.innerHTML=d.shifts.map(s=>{
+      const sm=s.summary, maxOpen=Math.max(1,...s.hours.map(h=>h.open||0));
+      const card=(label,val,sub)=>`<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;min-width:130px">
+        <div class="mono" style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.06em">${label}</div>
+        <div style="font-size:20px;font-weight:600;margin-top:4px">${val}</div><div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px">${sub||''}</div></div>`;
+      const cards=`<div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 14px">
+        ${card('Shift',`${hrTime(s.start)} – ${hrTime(s.end)}`,`shown until ${hrTime(s.shownUntil)} · ${sm.hoursShown}h`)}
+        ${card('Clock-in',s.clockIn?hrTime(s.clockIn):'–','Deputy')}
+        ${card('Avg open tickets',sm.avgOpen??'–',sm.snapshotsRecorded?`${sm.snapshotsRecorded} of ${sm.hoursShown} hours recorded`:'not recorded for this day')}
+        ${card('Replies / hour',sm.repliesPerHour??'–',sm.replies!=null?`${sm.replies} replies`:'')}
+        ${card('Avg reply time',hrMins(sm.avgReplyMin),'working hours')}
+        ${card('Break',hrMins(sm.breakMin),`${s.breaks.length} break${s.breaks.length===1?'':'s'}`)}
+        ${card('Idle',hrMins(sm.idleMin),`${s.idle.length} period${s.idle.length===1?'':'s'}`)}</div>`;
+      const rows=s.hours.map(h=>`<tr>
+        <td class="mono">${hrTime(h.start)} – ${hrTime(h.end)}</td>
+        <td>${h.open==null?'<span class="empty-cell">not recorded</span>':`<div style="display:flex;align-items:center;gap:8px"><div style="height:8px;width:${Math.round(h.open/maxOpen*120)}px;background:var(--info);border-radius:4px"></div><span class="num">${h.open}</span></div>`}</td>
+        <td><span class="num">${h.replies??'–'}</span></td>
+        <td><span class="num">${hrMins(h.avgReplyMin)}</span></td>
+        <td>${h.breakMin?`<span class="num" style="color:var(--purple)">${h.breakMin}m</span>`:'<span class="empty-cell">–</span>'}</td>
+        <td>${h.idleMin?`<span class="num" style="color:var(--danger)">${h.idleMin}m</span>`:'<span class="empty-cell">–</span>'}</td></tr>`).join('');
+      const list=(title,items,color)=>items.length?`<div class="mono" style="font-size:11px;margin-top:8px"><span style="color:var(--dim)">${title}:</span> ${items.map(x=>`<span style="color:${color}">${hrTime(x.start)}–${hrTime(x.end)}${x.ongoing?' (ongoing)':''}</span>`).join(' · ')}</div>`:'';
+      return `${cards}<div class="tbl-scroll"><table>
+        <thead><tr><th>Hour</th><th>Open tickets</th><th>Replies</th><th>Avg reply time</th><th>Break</th><th>Idle</th></tr></thead>
+        <tbody>${rows||'<tr><td colspan="6" class="empty">Shift is one hour or shorter, nothing to show after leaving out the last hour</td></tr>'}</tbody></table></div>
+        ${list('Breaks taken',s.breaks,'var(--purple)')}${list('Rostered breaks',s.plannedBreaks,'var(--dim)')}${list('Idle periods',s.idle,'var(--danger)')}`;
+    }).join('<hr style="border:none;border-top:1px solid var(--border);margin:18px 0">');
+  }catch(e){ box.innerHTML=`<div class="empty">Error: ${esc(e.message)}</div>`; }
+}
+</script>
+</body>
+</html>

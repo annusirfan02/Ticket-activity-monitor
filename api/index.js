@@ -1278,8 +1278,38 @@ app.get('/api/quality/csat', authMw, async (req,res)=>{
   } catch(e){ console.error('csat:', e.message); res.status(500).json({ok:false,error:e.message}); }
 });
 
-// ── HOURLY TAB: one agent's day hour by hour (api/hourly.js) ──
-app.get('/api/hourly', authMw, async (req,res)=>{
+// ── HOURLY VIEW: one agent's day hour by hour (api/hourly.js) ──
+// Not linked from the dashboard: opened only via /hourly, behind its own
+// password (HOURLY_PASSWORD). Its token is signed for this page only, so it
+// doesn't open the dashboard, and a dashboard login doesn't open this page.
+const HOURLY_TTL_MS = 12 * 3600 * 1000;
+const hrSig = exp => crypto.createHmac('sha256', SESSION_SECRET + '|hourly|' + (process.env.HOURLY_PASSWORD || '')).update('hourly.' + exp).digest('hex');
+function hourlyMw(req,res,next){
+  const t = req.headers['x-hourly-token'];
+  if (process.env.HOURLY_PASSWORD && typeof t === 'string' && t.indexOf('.') > 0) {
+    const [expStr, sig] = t.split('.'), exp = parseInt(expStr, 10), want = hrSig(exp);
+    if (exp && Date.now() <= exp && sig && sig.length === want.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return next();
+  }
+  res.status(401).json({ok:false,error:'Unauthorized'});
+}
+app.get('/hourly', (req,res)=>{
+  res.set({ 'X-Robots-Tag':'noindex, nofollow', 'Cache-Control':'no-store', 'Referrer-Policy':'no-referrer' });
+  res.sendFile(path.join(__dirname, '../views/hourly.html'));
+});
+app.post('/api/hourly/login', async (req,res)=>{
+  const pw = process.env.HOURLY_PASSWORD;
+  if (!pw) return res.status(503).json({ok:false,error:'This page is not set up yet'});
+  const given = String((req.body||{}).password || '');
+  const a = crypto.createHash('sha256').update(given).digest(), b = crypto.createHash('sha256').update(pw).digest();
+  if (!crypto.timingSafeEqual(a, b)) { await new Promise(r=>setTimeout(r,1000)); return res.status(401).json({ok:false,error:'Wrong password'}); }
+  const exp = Date.now() + HOURLY_TTL_MS;
+  res.json({ ok:true, token: `${exp}.${hrSig(exp)}` });
+});
+app.get('/api/hourly/agents', hourlyMw, async (req,res)=>{
+  try{ res.json({ok:true, agents:(await D.getAgents()).filter(a=>a.active!==false).map(a=>({email:a.email,name:a.name}))}); }
+  catch(e){ res.status(500).json({ok:false,error:e.message}); }
+});
+app.get('/api/hourly', hourlyMw, async (req,res)=>{
   try {
     const { date, agent } = req.query;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !agent) return res.status(400).json({ok:false,error:'date (YYYY-MM-DD) and agent required'});

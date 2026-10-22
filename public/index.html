@@ -203,7 +203,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
       <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
       <div class="tab" data-tab="reports" onclick="switchTab('reports')">Reports</div>
       <div class="tab" data-tab="quality" onclick="switchTab('quality')">Quality</div>
-      <div class="tab" data-tab="hourly" onclick="switchTab('hourly')">Hourly</div>
+
     </div>
 
     <!-- STATUS -->
@@ -400,27 +400,6 @@ tr:hover td{background:rgba(255,255,255,.015)}
             <th style="color:#d6334e">Red min</th><th style="color:#d6334e">Red max</th><th></th></tr></thead>
           <tbody id="threshBody"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
         </table></div>
-      </div>
-    </div>
-
-    <!-- HOURLY: one agent's day, hour by hour (last hour of each shift left out) -->
-    <div id="tab-hourly" class="hidden">
-      <div class="panel">
-        <div class="panel-head">
-          <div class="panel-title">⏱ Hourly View</div>
-          <div class="switcher" style="gap:6px;flex-wrap:wrap">
-            <input type="date" id="hrDate" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--mono);font-size:12px"/>
-            <label class="mono" style="color:var(--dim)">Agent:</label>
-            <select id="hrAgent"></select>
-            <button class="btn" onclick="hrLoad()">↻ Load</button>
-          </div>
-        </div>
-        <div class="mono" style="color:var(--dim);font-size:11px;padding:8px 18px 4px;line-height:1.6">
-          Each rostered shift on the chosen day, split into hours from the shift start. The last hour of every shift is not shown or counted.
-          Open tickets = the agent's tickets in Open status at the start of the hour (recorded hourly since this view went live).
-          Reply time = working hours only. Times in <span id="hrTz"></span>.
-        </div>
-        <div id="hrBody" style="padding:6px 18px 18px"><div class="empty">Pick a day and an agent, then Load</div></div>
       </div>
     </div>
 
@@ -817,9 +796,9 @@ function clearFilter(){ statFilter='all'; document.getElementById('filterBanner'
 // TABS
 function switchTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.dataset.tab===t));
-  ['status','stats','overdue','breaks','agents','statuses','history','reports','quality','hourly'].forEach(n=>document.getElementById('tab-'+n).classList.toggle('hidden',n!==t));
+  ['status','stats','overdue','breaks','agents','statuses','history','reports','quality'].forEach(n=>document.getElementById('tab-'+n).classList.toggle('hidden',n!==t));
   if(t==='quality') qOpen();
-  if(t==='hourly') hrOpen();
+
   if(t==='overdue')loadOverdue();
   if(t==='breaks'){ const di=document.getElementById('idleDate'); if(di&&!di.value)di.value=new Date().toISOString().split('T')[0]; fillIdleAgentDropdown(); loadIdle(); }
   if(t==='agents')loadAgents();
@@ -977,56 +956,6 @@ function dlTeamPdf(useRange, kind='team'){
   toast(`Preparing ${kind} PDF…`,'ok');
   return dlPdf(new Event('click'), a);
 }
-// HOURLY — one agent's day hour by hour
-async function hrOpen(){
-  document.getElementById('hrTz').textContent=dashTZ();
-  const d=document.getElementById('hrDate');
-  if(!d.value) d.value=new Date().toLocaleDateString('en-CA',{timeZone:dashTZ()});   // today in DISPLAY_TZ
-  const sel=document.getElementById('hrAgent');
-  if(!sel.options.length){
-    try{ const r=await authFetch('/api/agents'); const j=await r.json(); if(!j.ok) throw new Error(j.error);
-      sel.innerHTML=j.agents.filter(a=>a.active!==false).map(a=>`<option value="${esc(a.email)}">${esc(a.name||a.email)}</option>`).join('');
-    }catch(e){ toast('Could not load agents: '+e.message,'err'); }
-  }
-}
-function hrTime(ms){ return new Date(ms).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:dashTZ()}); }
-function hrMins(m){ if(m==null) return '–'; m=Math.round(m); return m<60?`${m}m`:`${Math.floor(m/60)}h ${m%60}m`; }
-async function hrLoad(){
-  const date=document.getElementById('hrDate').value, agent=document.getElementById('hrAgent').value, box=document.getElementById('hrBody');
-  if(!date||!agent){ toast('Pick a day and an agent','err'); return; }
-  box.innerHTML='<div class="empty">Loading…</div>';
-  try{
-    const r=await authFetch(`/api/hourly?date=${date}&agent=${encodeURIComponent(agent)}`); const d=await r.json(); if(!d.ok) throw new Error(d.error);
-    if(!d.shifts.length){ box.innerHTML=`<div class="empty">${esc(d.note||'No rostered shift on this date')}</div>`; return; }
-    box.innerHTML=d.shifts.map(s=>{
-      const sm=s.summary, maxOpen=Math.max(1,...s.hours.map(h=>h.open||0));
-      const card=(label,val,sub)=>`<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;min-width:130px">
-        <div class="mono" style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.06em">${label}</div>
-        <div style="font-size:20px;font-weight:600;margin-top:4px">${val}</div><div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px">${sub||''}</div></div>`;
-      const cards=`<div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 14px">
-        ${card('Shift',`${hrTime(s.start)} – ${hrTime(s.end)}`,`shown until ${hrTime(s.shownUntil)} · ${sm.hoursShown}h`)}
-        ${card('Clock-in',s.clockIn?hrTime(s.clockIn):'–','Deputy')}
-        ${card('Avg open tickets',sm.avgOpen??'–',sm.snapshotsRecorded?`${sm.snapshotsRecorded} of ${sm.hoursShown} hours recorded`:'not recorded for this day')}
-        ${card('Replies / hour',sm.repliesPerHour??'–',sm.replies!=null?`${sm.replies} replies`:'')}
-        ${card('Avg reply time',hrMins(sm.avgReplyMin),'working hours')}
-        ${card('Break',hrMins(sm.breakMin),`${s.breaks.length} break${s.breaks.length===1?'':'s'}`)}
-        ${card('Idle',hrMins(sm.idleMin),`${s.idle.length} period${s.idle.length===1?'':'s'}`)}</div>`;
-      const rows=s.hours.map(h=>`<tr>
-        <td class="mono">${hrTime(h.start)} – ${hrTime(h.end)}</td>
-        <td>${h.open==null?'<span class="empty-cell">not recorded</span>':`<div style="display:flex;align-items:center;gap:8px"><div style="height:8px;width:${Math.round(h.open/maxOpen*120)}px;background:var(--info);border-radius:4px"></div><span class="num">${h.open}</span></div>`}</td>
-        <td><span class="num">${h.replies??'–'}</span></td>
-        <td><span class="num">${hrMins(h.avgReplyMin)}</span></td>
-        <td>${h.breakMin?`<span class="num" style="color:var(--purple)">${h.breakMin}m</span>`:'<span class="empty-cell">–</span>'}</td>
-        <td>${h.idleMin?`<span class="num" style="color:var(--danger)">${h.idleMin}m</span>`:'<span class="empty-cell">–</span>'}</td></tr>`).join('');
-      const list=(title,items,color)=>items.length?`<div class="mono" style="font-size:11px;margin-top:8px"><span style="color:var(--dim)">${title}:</span> ${items.map(x=>`<span style="color:${color}">${hrTime(x.start)}–${hrTime(x.end)}${x.ongoing?' (ongoing)':''}</span>`).join(' · ')}</div>`:'';
-      return `${cards}<div class="tbl-scroll"><table>
-        <thead><tr><th>Hour</th><th>Open tickets</th><th>Replies</th><th>Avg reply time</th><th>Break</th><th>Idle</th></tr></thead>
-        <tbody>${rows||'<tr><td colspan="6" class="empty">Shift is one hour or shorter, nothing to show after leaving out the last hour</td></tr>'}</tbody></table></div>
-        ${list('Breaks taken',s.breaks,'var(--purple)')}${list('Rostered breaks',s.plannedBreaks,'var(--dim)')}${list('Idle periods',s.idle,'var(--danger)')}`;
-    }).join('<hr style="border:none;border-top:1px solid var(--border);margin:18px 0">');
-  }catch(e){ box.innerHTML=`<div class="empty">Error: ${esc(e.message)}</div>`; }
-}
-
 // QUALITY — Empathy and CSAT views share the date range and agent filter
 let qMode='empathy', qData={empathy:null, csat:null};
 function qOpen(){

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <meta name="robots" content="noindex, nofollow"/>
 <title>Live Status</title>
+<script src="/theme.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 :root{
@@ -158,6 +159,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
 </head>
 <body>
 <div class="lock" id="lock">
+  <button class="theme-btn" style="position:fixed;top:16px;right:16px;z-index:600" onclick="toggleTheme()">☀ Light</button>
   <div class="lock-box">
     <h2>Live Status</h2>
     <p>This page is password protected.</p>
@@ -173,6 +175,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
     <div class="topbar-right">
       <div class="live-pill"><div class="live-dot"></div>LIVE</div>
       <div class="last-chk" id="lastChk">—</div>
+      <button class="theme-btn" onclick="toggleTheme()">☀ Light</button>
       <button class="logout" onclick="lockPage()">Lock</button>
     </div>
   </div>

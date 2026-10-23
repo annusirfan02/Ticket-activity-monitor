@@ -4,6 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Activity Monitor</title>
+<script src="/theme.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 :root{
@@ -146,6 +147,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
 <body>
 
 <div class="login-overlay" id="loginOverlay">
+  <button class="theme-btn" style="position:fixed;top:16px;right:16px;z-index:600" onclick="toggleTheme()">☀ Light</button>
   <div class="login-box">
     <div class="login-logo">AM</div>
     <h2>Activity Monitor</h2>
@@ -163,6 +165,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
     <div class="topbar-right">
       <div class="live-pill"><div class="live-dot"></div>LIVE</div>
       <div class="last-chk" id="lastChk">—</div>
+      <button class="theme-btn" onclick="toggleTheme()">☀ Light</button>
       <button class="logout" onclick="doLogout()">Logout</button>
     </div>
   </div>
@@ -452,6 +455,7 @@ const dashTZ = () => cfg.tz || 'America/Los_Angeles';
 let countdownTimer=null, nextAt=null;
 let dbAgents = [];         // from /api/agents (managed list)
 let histChart = null;      // Chart.js instance
+let histTrend = null;      // last data drawn, to redraw on theme change
 let fdStatuses = [];       // available Freshdesk statuses (choice id + label)
 let trackedStatuses = [];  // currently tracked statuses (from /api/statuses)
 
@@ -769,19 +773,22 @@ function renderHistRows(rows){
     <td><span class="num o">${r.rd??0}</span></td></tr>`).join('');
 }
 function drawChart(dayTrend){
+  histTrend=dayTrend;
   const wrap=document.getElementById('histChartWrap');
+  const v=themeVar, rgba=(c,a)=>{const n=parseInt(c.slice(1),16);return `rgba(${n>>16},${(n>>8)&255},${n&255},${a})`;};
   if(!dayTrend||!dayTrend.length){ wrap.style.display='none'; if(histChart){histChart.destroy();histChart=null;} return; }
   wrap.style.display='block';
   const labels=dayTrend.map(d=>d.date.slice(5));
   const ctx=document.getElementById('histChart').getContext('2d');
   if(histChart)histChart.destroy();
   histChart=new Chart(ctx,{type:'line',data:{labels,datasets:[
-    {label:'New',data:dayTrend.map(d=>d.newTickets),borderColor:'#4d9fff',backgroundColor:'rgba(77,159,255,.1)',tension:.3},
-    {label:'Resolved',data:dayTrend.map(d=>d.resolved),borderColor:'#00e5a0',backgroundColor:'rgba(0,229,160,.1)',tension:.3},
-    {label:'Closed',data:dayTrend.map(d=>d.closed),borderColor:'#a064ff',backgroundColor:'rgba(160,100,255,.1)',tension:.3},
-  ]},options:{responsive:true,plugins:{legend:{labels:{color:'#dde2f0',font:{family:'monospace'}}}},
-    scales:{x:{ticks:{color:'#636b8a'},grid:{color:'#1f2436'}},y:{ticks:{color:'#636b8a'},grid:{color:'#1f2436'}}}}});
+    {label:'New',data:dayTrend.map(d=>d.newTickets),borderColor:v('--info'),backgroundColor:rgba(v('--info'),.1),tension:.3},
+    {label:'Resolved',data:dayTrend.map(d=>d.resolved),borderColor:v('--accent'),backgroundColor:rgba(v('--accent'),.1),tension:.3},
+    {label:'Closed',data:dayTrend.map(d=>d.closed),borderColor:v('--purple'),backgroundColor:rgba(v('--purple'),.1),tension:.3},
+  ]},options:{responsive:true,plugins:{legend:{labels:{color:v('--text'),font:{family:'monospace'}}}},
+    scales:{x:{ticks:{color:v('--dim')},grid:{color:v('--border')}},y:{ticks:{color:v('--dim')},grid:{color:v('--border')}}}}});
 }
+window.addEventListener('themechange',()=>{ if(histChart&&histTrend) drawChart(histTrend); });
 
 // REPORTS
 function repMonthVal(){ const v=document.getElementById('repMonth').value; return v || new Date().toISOString().slice(0,7); }

@@ -529,7 +529,7 @@ function generatePDF(report) {
               y += h + 8;
             }
           }
-          if (em.checked > em.reviewed) note(`${em.checked - em.reviewed} of ${em.checked} tickets show the quick check only (Claude review pending or outside the review window).`);
+          if (em.checked > em.reviewed) note(`${em.checked - em.reviewed} of ${em.checked} tickets are awaiting Claude review and aren't counted yet.`);
         }
       }
     }
@@ -864,7 +864,7 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       const rows = agents.slice()
         .sort((a, b) => (b.empathy?.missed || 0) - (a.empathy?.missed || 0) || (a.csat?.csatPct ?? 101) - (b.csat?.csatPct ?? 101))
         .map(r => row(r.name || r.email, r.csat, r.empathy, r.flags?.csat_pct, r.flags?.empathy_missed_pct));
-      const noteText = withEmp && tem && tem.checked > tem.reviewed ? `${tem.reviewed} of ${tem.checked} tickets reviewed by Claude` : 'Sorted by empathy missed';
+      const noteText = withEmp && tem && tem.checked > tem.reviewed ? `${tem.reviewed} of ${tem.checked} tickets reviewed by Claude; the rest aren't counted yet` : 'Sorted by empathy missed';
       sectionTitle('Customer experience', noteText, (rows.length + 2) * ROW_H);
       drawTable([{ label:'Agent', width:W - cols.reduce((s, c) => s + c.width, 0) }, ...cols], rows,
         { totalRow: row('Team', tcs, tem, teamCsatFlag, teamEmpFlag) });

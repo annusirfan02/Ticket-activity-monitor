@@ -53,19 +53,19 @@ function csatTotals(ratings) {
 }
 
 // ── EMPATHY (empathy_checks) ──
-// A Claude review (scheduled routine) replaces the quick check's verdict.
+// Only the Claude review (scheduled routine) decides: it reads and summarises
+// the whole thread. The keyword quick check just queues tickets; a ticket that
+// hasn't been reviewed yet is "awaiting review" and counts neither way.
 function empathyVerdict(r) {
   const reviewed = r.review_source === 'claude';
-  const upset = reviewed ? !!r.ai_upset : r.frustrated > 0;
-  const missed = reviewed ? !!r.ai_empathy_missing : r.missing > 0;
-  return { reviewed, upset, missed };
+  return { reviewed, pending: !reviewed, upset: reviewed && !!r.ai_upset, missed: reviewed && !!r.ai_empathy_missing };
 }
 
 function empathyTotals(rows) {
-  const t = { checked: rows.length, reviewed: 0, upset: 0, acknowledged: 0, missed: 0 };
+  const t = { checked: rows.length, reviewed: 0, pending: 0, upset: 0, acknowledged: 0, missed: 0 };
   for (const r of rows) {
     const v = empathyVerdict(r);
-    if (v.reviewed) t.reviewed++;
+    if (v.reviewed) t.reviewed++; else t.pending++;
     if (v.upset) t.upset++;
     if (v.upset && !v.missed) t.acknowledged++;
     if (v.missed) t.missed++;
@@ -76,15 +76,10 @@ function empathyTotals(rows) {
 
 // Missed tickets for a report: ticket, date and a short reason (no customer quotes).
 function empathyMissedList(rows) {
-  return rows.filter(r => empathyVerdict(r).missed).map(r => {
-    const reviewed = r.review_source === 'claude';
-    return {
-      ticketId: r.ticket_id, url: r.ticket_url || ticketUrl(r.ticket_id), date: r.resolved_date,
-      source: reviewed ? 'claude' : 'quick',
-      reason: reviewed ? (r.ai_reason || '')
-        : 'Quick check: a customer message read as upset and the next reply had no acknowledgement. Claude review pending.',
-    };
-  });
+  return rows.filter(r => empathyVerdict(r).missed).map(r => ({
+    ticketId: r.ticket_id, url: r.ticket_url || ticketUrl(r.ticket_id), date: r.resolved_date,
+    source: 'claude', reason: r.ai_reason || '',
+  }));
 }
 
 // Freshdesk group id -> name (0 = no group).

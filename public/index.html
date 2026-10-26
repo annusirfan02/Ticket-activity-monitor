@@ -406,12 +406,10 @@ tr:hover td{background:rgba(255,255,255,.015)}
 
         <div id="qEmpathy">
           <div class="mono" style="color:var(--dim);font-size:11px;padding:10px 18px;line-height:1.6">
-            Resolved and closed tickets only. A ticket is flagged when a customer message is upset and the next agent reply has no
-            acknowledgement (e.g. "sorry", "I understand", "thank you for your patience"). "Upset" means a negative tone score
-            (VADER sentiment, −1 to +1, at or below −0.3) or strong emotion words ("frustrated", "unacceptable", "ridiculous", "!!").
-            Plain status updates like "still can't see it" and polite urgency ("please escalate ASAP") don't count.
-            This quick check runs within minutes of a ticket being resolved; an hourly Claude review then re-reads each ticket,
-            adds a summary and replaces the quick verdict ("Reviewed by Claude").
+            Resolved and closed tickets only. An hourly Claude review reads each whole conversation, summarises it and then decides,
+            as a team lead would, whether the customer was genuinely upset and whether the agent's reply acknowledged it.
+            It judges meaning, not keywords: polite urgency, deadlines or leaving another platform don't count as upset.
+            Only Claude's verdicts are counted; tickets it hasn't reviewed yet are shown as awaiting review.
             <div id="qEmpCoverage" style="margin-top:6px;color:var(--text)"></div>
           </div>
           <div class="tbl-scroll"><table>
@@ -925,7 +923,7 @@ function qRender(){
     const rows=d.agents.filter(mine);
     const cov=who?(rows[0]||{checked:0,reviewed:0}):{checked:d.checked,reviewed:d.reviewed||0};
     document.getElementById('qEmpCoverage').textContent = cov.checked
-      ? `Reviewed by Claude: ${cov.reviewed} of ${cov.checked} tickets in this period (the rest show the quick check until the next review).` : '';
+      ? `Reviewed by Claude: ${cov.reviewed} of ${cov.checked} tickets in this period${cov.checked>cov.reviewed?` · ${cov.checked-cov.reviewed} awaiting review (not counted yet)`:''}.` : '';
     document.getElementById('qEmpSummary').innerHTML = rows.length ? rows.map(a=>`<tr>${person(a)}
       <td><span class="num">${a.checked}</span></td><td><span class="num">${a.frustrated}</span></td>
       <td><span class="num g">${a.acknowledged}</span></td><td>${red(a.flagged,a.flagged)}</td>

@@ -35,11 +35,17 @@ Email addresses and phone numbers are masked as `[email]` / `[phone]`.
 ```
 
 **customer_upset** — true only if the customer expresses a negative feeling:
-frustration, anger, disappointment, feeling ignored, being fed up, chasing
-repeatedly with irritation, or worry about real harm to their business.
+frustration, anger, disappointment, feeling ignored, being fed up, or chasing
+repeatedly with irritation.
 False for neutral status updates and polite requests, even when the problem is
 still open or urgent — e.g. "I still can't see the contacts, can you check?",
 "Error 404 when adding a card", "please escalate ASAP, thanks".
+Business impact or urgency **on its own** is also not upset: a customer calmly
+explaining that the issue is costing them sales, blocking a launch, affecting
+their clients or needed by a deadline is giving context, not expressing a
+feeling. It only counts when the same message also shows frustration, anger,
+disappointment or irritation (e.g. "this is the third time I'm asking and I'm
+losing clients", "I'm really frustrated, this is costing me sales").
 
 **empathy_missing** — only when `customer_upset` is true. Look at the **first
 agent reply after each upset customer message** (that is the reply that should

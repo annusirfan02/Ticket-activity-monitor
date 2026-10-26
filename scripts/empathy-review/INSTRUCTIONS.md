@@ -18,10 +18,40 @@ push. The only data you write is through `save.js` below.
 5. Finish with one line: how many tickets were reviewed and how many had
    empathy missing.
 
-## What to decide per ticket
+## How to review a ticket: read, summarise, then decide
 
 Each ticket has `messages` in time order, each `from: "customer"` or `"agent"`.
 Email addresses and phone numbers are masked as `[email]` / `[phone]`.
+
+Do **not** decide from words or phrases. "Cancel", "frustrated", "two weeks",
+"costing me money", "urgent" or "!!" mean nothing on their own: the same word
+can be a complaint, a plan, a quote, or good news. Work in this order for every
+ticket:
+
+1. **Read the whole conversation**, start to finish, before judging anything.
+2. **Summarise it for yourself** — what the customer needed, what happened, how
+   it ended, and how the customer *felt* over time: their tone towards us and
+   the agent (polite? appreciative? irritated? angry?), and what any worry or
+   negative words were actually about.
+3. **Only then decide**, from that understanding, the way an experienced support
+   team lead would after reading the thread.
+
+Things to get right when reading:
+- **What is the feeling directed at?** Cancelling or leaving *another* service
+  (an old platform, a website builder, a provider they are moving away from),
+  ending their own trial as a planning step, or a deadline elsewhere is the
+  customer's situation, not a complaint about us.
+- **Tone over topic.** A customer who stays polite, thanks the agent and says
+  they like the product while explaining stakes and deadlines is not upset,
+  even if the issue drags on. Upset means they actually sound frustrated,
+  angry, disappointed, ignored or fed up with us or the service.
+- **Good news is not upset.** Excitement ("it worked!!"), relief and thanks
+  are positive.
+- **Judge the agent across the thread too.** If the agent already acknowledged
+  the customer's situation and kept owning the issue, a later short status
+  update to the same, unchanged situation is not a missed-empathy moment.
+
+## What to record per ticket
 
 ```json
 {
@@ -48,8 +78,8 @@ disappointment or irritation (e.g. "this is the third time I'm asking and I'm
 losing clients", "I'm really frustrated, this is costing me sales").
 
 **empathy_missing** — only when `customer_upset` is true. Look at the **first
-agent reply after each upset customer message** (that is the reply that should
-have acknowledged it). Empathy is missing if, for any upset message, that first
+agent reply after each message where the customer was genuinely upset** (that
+is the reply that should have acknowledged it). Empathy is missing if that
 reply does not acknowledge the customer's feelings or situation at all: no
 apology, no "I understand how frustrating this is", no recognition of their
 concern, the delay or the impact, no reassurance of ownership. These are not
@@ -57,7 +87,13 @@ acknowledgement: a greeting ("I hope you're doing great!"), only answering the
 technical question, or a stock closing line ("Thank you for your patience and
 understanding") that ignores what the customer just said. An apology that only
 comes in a later reply doesn't undo a missed first reply — mention it in
-`reason` instead. If `customer_upset` is false, set `empathy_missing` to false.
+`reason` instead. But if the agent had already acknowledged the same situation
+and the customer's next message only repeats or updates it, a reply that
+continues to own the issue is fine. If `customer_upset` is false, set
+`empathy_missing` to false.
+
+When in doubt, don't flag: a flag should be something a team lead would agree
+with after reading the thread.
 
 If **no agent reply follows** an upset message in the ticket (the customer had
 the last word, e.g. the issue was handled by phone or the ticket was closed),
@@ -79,5 +115,5 @@ These stay in the dashboard only.
 
 **summary** — factual, no names of people, no masked values, no judgement words.
 
-Be consistent: judge the conversation as a support team lead would, not by
-single words.
+Be consistent: judge the conversation as a support team lead would, from your
+understanding of the whole thread, never by single words.

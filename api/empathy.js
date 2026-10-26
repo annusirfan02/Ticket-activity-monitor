@@ -72,13 +72,31 @@ function excerpt(text, index, len) {
   const s = Math.max(0, index - 60), e = Math.min(text.length, index + len + 60);
   return (s > 0 ? '…' : '') + text.slice(s, e).replace(/\s+/g, ' ').trim() + (e < text.length ? '…' : '');
 }
+// The sentence around position i (for judging a strong-emotion match in context).
+function sentenceAt(text, i) {
+  const start = Math.max(text.lastIndexOf('\n', i - 1), ...['. ', '! ', '? '].map(p => { const k = text.lastIndexOf(p, i - 1); return k < 0 ? -1 : k + 1; })) + 1;
+  const ends = ['\n', '. ', '? '].map(p => text.indexOf(p, i)).filter(k => k >= 0);
+  return text.slice(start, ends.length ? Math.min(...ends) + 1 : text.length);
+}
+// A match doesn't count when it's negated ("won't have to cancel my account")
+// or its sentence is positive ("IT WORKED!!", "thankfully no need to cancel").
+const NEGATED = /\b(won'?t|will not|don'?t|do not|didn'?t|did not|not|never|no need to|no longer|without)\s+(\w+\s+){0,3}$/i;
+const POSITIVE_SENTENCE = 0.3;
+
 // Returns { cue, excerpt, tone } when the customer message is upset, else null.
 // cue = the strong-emotion words, or "negative tone" when VADER alone triggered.
 function frustrationCue(text) {
   const t = +tone(text).toFixed(2);
   for (const rx of STRONG_EMOTION) {
-    const m = rx.exec(text);
-    if (m) return { cue: m[0], excerpt: excerpt(text, m.index, m[0].length), tone: t };
+    const g = new RegExp(rx.source, rx.flags.includes('g') ? rx.flags : rx.flags + 'g');
+    let m;
+    while ((m = g.exec(text))) {
+      if (NEGATED.test(text.slice(Math.max(0, m.index - 40), m.index))) continue;
+      if (tone(sentenceAt(text, m.index)) >= POSITIVE_SENTENCE) continue;
+      // "!!" is excitement as often as anger: only counts in a message that isn't positive overall
+      if (m[0].startsWith('!') && t >= POSITIVE_SENTENCE) continue;
+      return { cue: m[0], excerpt: excerpt(text, m.index, m[0].length), tone: t };
+    }
   }
   if (t <= NEGATIVE_TONE) {
     const s = mostNegativeSentence(text), i = Math.max(0, text.indexOf(s));

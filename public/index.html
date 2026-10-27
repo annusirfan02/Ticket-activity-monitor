@@ -936,11 +936,17 @@ function qRender(){
     const said=t=>t.source==='claude'
       ? `${t.summary?`<div style="margin-bottom:6px">${esc(t.summary)}</div>`:''}${t.evidence.map(e=>e.customer?`<div style="margin-bottom:6px">“${esc(e.customer)}”</div>`:'').join('')}`
       : t.findings.map(f=>`<div style="margin-bottom:6px">${qMark(f.excerpt,f.cue)}<div class="ae">${qWhen(f.customer_at)}${f.tone!=null?` · tone ${f.tone>0?'+':''}${f.tone}`:''}${f.cue==='negative tone'?' · negative tone':''}</div></div>`).join('');
+    // frustration / handling scores (1–5) and coaching, recorded for flagged tickets
+    const chip=(label,v,color)=>`<span class="chip" style="border-color:${color};color:${color}">${label} ${v}/5</span>`;
+    const fColor=v=>v>=4?'var(--danger)':v===3?'var(--orange)':'var(--warn)';
+    const hColor=v=>v>=4?'var(--accent)':v===3?'var(--warn)':'var(--danger)';
+    const scores=t=>t.frustration==null&&t.handling==null?''
+      : `<div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap">${t.frustration!=null?chip('Frustration',t.frustration,fColor(t.frustration)):''}${t.handling!=null?chip('Handling',t.handling,hColor(t.handling))+`<span class="chip" style="border-color:${hColor(t.handling)};color:${hColor(t.handling)}">${esc(t.handlingLabel)}</span>`:''}</div>`;
     const replied=t=>t.source==='claude'
-      ? `${t.evidence.map(e=>e.agent?`<div style="margin-bottom:6px">“${esc(e.agent)}”</div>`:'').join('')}${t.reason?`<div class="ae" style="color:var(--danger)">${esc(t.reason)}</div>`:''}`
+      ? `${t.evidence.map(e=>e.agent?`<div style="margin-bottom:6px">“${esc(e.agent)}”</div>`:'').join('')}${t.reason?`<div class="ae" style="color:var(--danger)">${esc(t.reason)}</div>`:''}${t.coaching?`<div class="ae" style="color:var(--info);margin-top:6px">💡 Could have: ${esc(t.coaching)}</div>`:''}`
       : t.findings.map(f=>`<div style="margin-bottom:6px">${esc(f.reply_excerpt)}<div class="ae">${qWhen(f.reply_at)}</div></div>`).join('');
     document.getElementById('qEmpFlagged').innerHTML = list.length ? list.map(t=>`<tr>
-      <td><a class="tkt-link" href="${esc(t.url)}" target="_blank" rel="noopener">#${t.ticketId}</a><div class="ae">${esc(t.subject)}</div>${srcBadge(t)}</td>
+      <td><a class="tkt-link" href="${esc(t.url)}" target="_blank" rel="noopener">#${t.ticketId}</a><div class="ae">${esc(t.subject)}</div>${srcBadge(t)}${scores(t)}</td>
       <td>${esc(t.name)}</td><td class="mono">${qWhen(t.resolvedAt)}</td>
       <td>${said(t)}</td><td>${replied(t)}</td></tr>`).join('')
       : `<tr><td colspan="5" class="empty">No flagged tickets${d.checked?'':' — none checked in this period yet (checks run with each poll)'}</td></tr>`;

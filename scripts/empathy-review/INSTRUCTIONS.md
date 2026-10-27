@@ -60,9 +60,32 @@ Things to get right when reading:
   "customer_upset": true,
   "empathy_missing": true,
   "reason": "One or two sentences explaining the verdict.",
-  "evidence": [{ "customer": "short exact quote", "agent": "short exact quote" }]
+  "evidence": [{ "customer": "short exact quote", "agent": "short exact quote" }],
+  "frustration_score": 3,
+  "handling_score": 4,
+  "coaching": "One or two sentences: what the agent could have said or done to show more empathy."
 }
 ```
+
+`frustration_score`, `handling_score` and `coaching` are **only for tickets
+where `empathy_missing` is true**; leave them out (or null) otherwise.
+
+**frustration_score** (1–5) — how frustrated the customer actually was at the
+missed moment, from your reading of the thread:
+1 mild concern or worry · 2 impatient or uneasy · 3 clearly frustrated ·
+4 very frustrated or exasperated · 5 angry, threatening to leave, escalate or
+dispute.
+
+**handling_score** (1–5) — how well the agent handled the customer overall
+across the ticket, not only the missed reply:
+5 handled well, one small miss · 4 mostly good, a noticeable miss ·
+3 mixed: some acknowledgement, some clear misses · 2 mostly missed the
+customer's feelings · 1 ignored or dismissed them throughout.
+
+**coaching** — concrete and kind, aimed at the agent: what to acknowledge and
+how (e.g. "Thank the customer for testing every step, apologise for the
+two-day wait and acknowledge the repeated failures before giving the next
+suggestion."). Same rules as `reason`: own words, no customer quotes, no names.
 
 **customer_upset** — true only if the customer expresses a negative feeling:
 frustration, anger, disappointment, feeling ignored, being fed up, or chasing

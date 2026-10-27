@@ -5,7 +5,8 @@
 // were in pending.json are accepted, and every field is validated first.
 //
 // results.json: [{ ticket_id, summary, customer_upset, empathy_missing, reason,
-//                  evidence: [{ customer, agent }] }]
+//                  evidence: [{ customer, agent }],
+//                  frustration_score, handling_score, coaching }]   <- last three: flagged only
 // usage: node scripts/empathy-review/save.js [--model NAME]
 // env:   SUPABASE_URL, SUPABASE_SERVICE_KEY
 require('dotenv').config();
@@ -20,6 +21,10 @@ const MODEL = i > 0 ? process.argv[i + 1] : 'claude';
 const str = (v, max) => typeof v === 'string' ? v.trim().slice(0, max) : '';
 // tolerate a UTF-8 byte-order mark (some editors/shells add one)
 const readJson = (file) => JSON.parse(fs.readFileSync(path.join(DIR, file), 'utf8').replace(/^﻿/, ''));
+const score = (v) => Number.isInteger(v) && v >= 1 && v <= 5 ? v : null;
+// the score columns may not exist yet (db/schema.sql); then save without them
+let scoreColumns = true;
+const SCORE_COLS = ['ai_frustration', 'ai_handling', 'ai_coaching'];
 
 (async () => {
   const pending = new Set(readJson('pending.json').map(t => t.ticket_id));
@@ -32,14 +37,27 @@ const readJson = (file) => JSON.parse(fs.readFileSync(path.join(DIR, file), 'utf
     if (typeof r.customer_upset !== 'boolean' || typeof r.empathy_missing !== 'boolean' || !str(r.summary, 600)) {
       problems.push(`${id}: needs summary, customer_upset (true/false) and empathy_missing (true/false)`); continue;
     }
+    const missed = r.customer_upset && r.empathy_missing;
+    if (missed && (!score(r.frustration_score) || !score(r.handling_score) || !str(r.coaching, 600))) {
+      problems.push(`${id}: empathy_missing is true, so it needs frustration_score (1-5), handling_score (1-5) and coaching`); continue;
+    }
     const evidence = (Array.isArray(r.evidence) ? r.evidence : []).slice(0, 3)
       .map(e => ({ customer: str(e?.customer, 300), agent: str(e?.agent, 300) })).filter(e => e.customer || e.agent);
-    const { error } = await D.db().from('empathy_checks').update({
+    const row = {
       review_source: 'claude', summary: str(r.summary, 600),
-      ai_upset: r.customer_upset, ai_empathy_missing: r.customer_upset && r.empathy_missing,
+      ai_upset: r.customer_upset, ai_empathy_missing: missed,
       ai_reason: str(r.reason, 600), ai_evidence: evidence,
+      ai_frustration: missed ? score(r.frustration_score) : null, ai_handling: missed ? score(r.handling_score) : null,
+      ai_coaching: missed ? str(r.coaching, 600) : null,
       reviewed_at: new Date().toISOString(), reviewed_model: MODEL,
-    }).eq('ticket_id', id);
+    };
+    if (!scoreColumns) SCORE_COLS.forEach(c => delete row[c]);
+    let { error } = await D.db().from('empathy_checks').update(row).eq('ticket_id', id);
+    if (error && scoreColumns && /ai_(frustration|handling|coaching)/.test(error.message)) {
+      scoreColumns = false; SCORE_COLS.forEach(c => delete row[c]);
+      console.log('note: score columns not set up yet (see db/schema.sql); saving without scores');
+      ({ error } = await D.db().from('empathy_checks').update(row).eq('ticket_id', id));
+    }
     if (error) problems.push(`${id}: ${error.message}`); else saved++;
   }
   console.log(`saved: ${saved} of ${results.length}${problems.length ? `\nproblems:\n  ${problems.join('\n  ')}` : ''}`);

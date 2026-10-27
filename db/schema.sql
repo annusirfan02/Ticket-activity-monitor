@@ -235,6 +235,11 @@ alter table empathy_checks add column if not exists reviewed_model     text;
 create index if not exists idx_empathy_review on empathy_checks(review_source);
 -- ticket's Freshdesk group (0 = none), for the Group PDF
 alter table empathy_checks add column if not exists group_id bigint;
+-- flagged tickets only (Claude review): how frustrated the customer was (1–5),
+-- how well the agent handled it overall (1–5) and what would have helped
+alter table empathy_checks add column if not exists ai_frustration smallint;
+alter table empathy_checks add column if not exists ai_handling    smallint;
+alter table empathy_checks add column if not exists ai_coaching    text;
 
 -- ── Reply times: one row per agent reply that answered a waiting customer ──
 -- (api/responses.js). wait_start = the customer's first unanswered message;

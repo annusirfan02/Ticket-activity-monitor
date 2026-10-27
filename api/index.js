@@ -1249,6 +1249,8 @@ app.get('/api/quality/empathy', authMw, async (req,res)=>{
       missing:r.missing, frustrated:r.frustrated, findings:r.findings || [],
       // Claude review
       summary:r.summary, reason:r.ai_reason, evidence:r.ai_evidence || [], reviewedAt:r.reviewed_at,
+      frustration:r.ai_frustration ?? null, handling:r.ai_handling ?? null, handlingLabel:Q.handlingLabel(r.ai_handling ?? null),
+      coaching:r.ai_coaching || '',
     }));
     res.json({ ok:true, from:range.from, to:range.to, checked:rows.length, reviewed:rows.filter(reviewed).length, agents, flagged });
   } catch(e){

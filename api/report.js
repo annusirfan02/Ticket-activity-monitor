@@ -519,13 +519,19 @@ function generatePDF(report) {
             ensure(40); y += 4;
             doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.ink).text('Tickets where empathy was missed', M, y); y = doc.y + 6;
             for (const it of list) {
-              const head = `#${it.ticketId}  ·  ${it.date ? dayLabel(it.date) : ''}  ·  ${it.source === 'claude' ? 'Reviewed by Claude' : 'Quick check'}`;
+              const sc = [it.frustration != null ? `Frustration ${it.frustration}/5` : '',
+                it.handling != null ? `Handling ${it.handling}/5 (${Q.handlingLabel(it.handling)})` : ''].filter(Boolean).join('  ·  ');
+              const head = `#${it.ticketId}  ·  ${it.date ? dayLabel(it.date) : ''}${sc ? '  ·  ' + sc : ''}`;
+              const coach = it.coaching ? `Could have: ${it.coaching}` : '';
               doc.font('Helvetica').fontSize(8.5);
-              const h = 14 + doc.heightOfString(it.reason || '–', { width:W - 14 });
+              const hr = doc.heightOfString(it.reason || '–', { width:W - 14 });
+              const hc = coach ? 3 + doc.heightOfString(coach, { width:W - 14 }) : 0;
+              const h = 14 + hr + hc;
               ensure(h + 8);
               doc.rect(M, y, 3, h).fill(FLAG_COLOR.red);
               doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.ink).text(head, M + 10, y, { width:W - 14, lineBreak:false });
               doc.font('Helvetica').fontSize(8.5).fillColor(C.body).text(it.reason || '–', M + 10, y + 13, { width:W - 14 });
+              if (coach) doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(C.muted).text(coach, M + 10, y + 13 + hr + 3, { width:W - 14 });
               y += h + 8;
             }
           }

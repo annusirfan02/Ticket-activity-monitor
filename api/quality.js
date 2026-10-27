@@ -79,7 +79,13 @@ function empathyMissedList(rows) {
   return rows.filter(r => empathyVerdict(r).missed).map(r => ({
     ticketId: r.ticket_id, url: r.ticket_url || ticketUrl(r.ticket_id), date: r.resolved_date,
     source: 'claude', reason: r.ai_reason || '',
+    frustration: r.ai_frustration ?? null, handling: r.ai_handling ?? null, coaching: r.ai_coaching || '',
   }));
+}
+
+// Handling score (1–5, flagged tickets) -> label
+function handlingLabel(s) {
+  return s == null ? null : s >= 4 ? 'Minor miss' : s === 3 ? 'Partial' : 'Major miss';
 }
 
 // Freshdesk group id -> name (0 = no group).
@@ -118,5 +124,5 @@ async function groupCustomerExperience(fromDate, toDate, trackedEmails) {
     unknownGroup: rows ? rows.filter(r => r.group_id == null).length : 0 };
 }
 
-module.exports = { fetchCsatRatings, csatTotals, csatTone, empathyVerdict, empathyTotals, empathyMissedList, fdAgentEmails,
+module.exports = { fetchCsatRatings, csatTotals, csatTone, empathyVerdict, empathyTotals, empathyMissedList, handlingLabel, fdAgentEmails,
   fdGroupNames, groupCustomerExperience, ticketUrl, pct };

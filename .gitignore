@@ -4,5 +4,6 @@ node_modules/
 *.log
 DB.txt
 *.txt
-# Claude empathy review working files (contain ticket text)
+# Claude empathy and SOP review working files (contain ticket text)
 .empathy-review/
+.sop-review/

@@ -353,6 +353,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
               <label><input type="checkbox" value="custom" checked/> Custom Statuses (A2P, GHL, etc)</label>
               <label><input type="checkbox" value="csat" checked/> CSAT</label>
               <label><input type="checkbox" value="empathy" checked/> Empathy</label>
+              <label><input type="checkbox" value="sop" checked/> SOP compliance</label>
             </div>
           </div>
         </div>
@@ -387,6 +388,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
           <div class="switcher" style="gap:6px">
             <button class="btn primary" id="qBtnEmpathy" onclick="qView('empathy')">💬 Empathy</button>
             <button class="btn" id="qBtnCsat" onclick="qView('csat')">⭐ CSAT</button>
+            <button class="btn" id="qBtnSop" onclick="qView('sop')">📋 SOP</button>
           </div>
           <div class="switcher" style="gap:6px;flex-wrap:wrap">
             <label class="mono" style="color:var(--dim)">Period:</label>
@@ -420,6 +422,25 @@ tr:hover td{background:rgba(255,255,255,.015)}
           <div class="tbl-scroll"><table>
             <thead><tr><th>Ticket</th><th>Agent</th><th>Resolved</th><th>Customer said</th><th>Agent replied</th></tr></thead>
             <tbody id="qEmpFlagged"><tr><td colspan="5" class="empty">—</td></tr></tbody>
+          </table></div>
+        </div>
+
+        <div id="qSop" class="hidden">
+          <div class="mono" style="color:var(--dim);font-size:11px;padding:10px 18px;line-height:1.6">
+            Resolved and closed tickets, checked from Oct 28, 2026 onwards. An hourly Claude review reads each conversation and the agency's SOP in Notion
+            (WLS Support SOPs, matched by relationship ID), then decides whether the agent's resolution followed it.
+            A ticket is only judged when the SOP covers its topic (refunds, cancellations, escalations, mobile app, Zapier and so on);
+            agencies without an SOP, and topics the SOP doesn't cover, are never flagged.
+            <div id="qSopCoverage" style="margin-top:6px;color:var(--text)"></div>
+          </div>
+          <div class="tbl-scroll"><table>
+            <thead><tr><th>Agent</th><th>Tickets reviewed</th><th>Covered by SOP</th><th>Followed</th><th>Incorrect</th><th>Incorrect rate</th></tr></thead>
+            <tbody id="qSopSummary"><tr><td colspan="6" class="empty">Pick dates and click Load</td></tr></tbody>
+          </table></div>
+          <div class="panel-title" style="padding:16px 18px 6px">Flagged tickets</div>
+          <div class="tbl-scroll"><table>
+            <thead><tr><th>Ticket</th><th>Agent</th><th>Resolved</th><th>What the SOP says</th><th>What the agent did</th></tr></thead>
+            <tbody id="qSopFlagged"><tr><td colspan="5" class="empty">—</td></tr></tbody>
           </table></div>
         </div>
 
@@ -863,8 +884,8 @@ function dlTeamPdf(useRange, kind='team'){
   toast(`Preparing ${kind} PDF…`,'ok');
   return dlPdf(new Event('click'), a);
 }
-// QUALITY — Empathy and CSAT views share the date range and agent filter
-let qMode='empathy', qData={empathy:null, csat:null};
+// QUALITY — Empathy, CSAT and SOP views share the date range and agent filter
+let qMode='empathy', qData={empathy:null, csat:null, sop:null};
 function qOpen(){
   const loc=x=>new Date(x-x.getTimezoneOffset()*60000).toISOString().slice(0,10), now=new Date();
   const m=document.getElementById('qMonth'), f=document.getElementById('qFrom'), t=document.getElementById('qTo');
@@ -877,7 +898,7 @@ function qPeriodChanged(){
   const range=qIsRange();
   document.querySelectorAll('.q-range').forEach(el=>el.classList.toggle('hidden',!range));
   document.querySelectorAll('.q-month').forEach(el=>el.classList.toggle('hidden',range));
-  qData={empathy:null, csat:null}; qLoad();
+  qData={empathy:null, csat:null, sop:null}; qLoad();
 }
 // from/to for the selected period; a month is its first to last day
 function qPeriod(){
@@ -890,20 +911,22 @@ function qView(m){
   qMode=m;
   document.getElementById('qBtnEmpathy').classList.toggle('primary',m==='empathy');
   document.getElementById('qBtnCsat').classList.toggle('primary',m==='csat');
+  document.getElementById('qBtnSop').classList.toggle('primary',m==='sop');
   document.getElementById('qEmpathy').classList.toggle('hidden',m!=='empathy');
   document.getElementById('qCsat').classList.toggle('hidden',m!=='csat');
+  document.getElementById('qSop').classList.toggle('hidden',m!=='sop');
   if(!qData[m]) qLoad(); else qRender();
 }
 async function qLoad(){
   const { from, to }=qPeriod();
   if(!from||!to){ toast(qIsRange()?'Pick both dates':'Pick a month','err'); return; }
   if(from>to){ toast('From date must be on or before To date','err'); return; }
-  const [sumId, listId, cols] = qMode==='empathy' ? ['qEmpSummary','qEmpFlagged',6] : ['qCsatSummary','qCsatNeg',6];
+  const [sumId, listId, cols] = {empathy:['qEmpSummary','qEmpFlagged',6], csat:['qCsatSummary','qCsatNeg',6], sop:['qSopSummary','qSopFlagged',6]}[qMode];
   document.getElementById(sumId).innerHTML=`<tr><td colspan="${cols}" class="empty">Loading…</td></tr>`;
   document.getElementById(listId).innerHTML='';
   try{
     const r=await authFetch(`/api/quality/${qMode}?from=${from}&to=${to}`); const d=await r.json(); if(!d.ok) throw new Error(d.error);
-    qData={empathy:null, csat:null};   // the other view reloads for this period when opened
+    qData={empathy:null, csat:null, sop:null};   // the other view reloads for this period when opened
     qData[qMode]=d;
     const sel=document.getElementById('qAgent'), keep=sel.value;
     sel.innerHTML='<option value="">All agents</option>'+d.agents.map(a=>`<option value="${esc(a.email)}">${esc(a.name)}</option>`).join('');
@@ -950,6 +973,25 @@ function qRender(){
       <td>${esc(t.name)}</td><td class="mono">${qWhen(t.resolvedAt)}</td>
       <td>${said(t)}</td><td>${replied(t)}</td></tr>`).join('')
       : `<tr><td colspan="5" class="empty">No flagged tickets${d.checked?'':' — none checked in this period yet (checks run with each poll)'}</td></tr>`;
+  } else if(qMode==='sop'){
+    const rows=d.agents.filter(mine), t=who?(rows[0]||{reviewed:0}):d.totals;
+    document.getElementById('qSopCoverage').textContent = t.reviewed
+      ? `Reviewed by Claude: ${t.reviewed} tickets · covered by the SOP: ${t.covered} · SOP doesn't cover the topic: ${t.notCovered} · no SOP for the agency: ${t.noSop}.`
+      : '';
+    document.getElementById('qSopSummary').innerHTML = rows.length ? rows.map(a=>`<tr>${person(a)}
+      <td><span class="num">${a.reviewed}</span></td><td><span class="num">${a.covered}</span></td>
+      <td><span class="num g">${a.followed}</span></td><td>${red(a.incorrect,a.incorrect)}</td>
+      <td>${a.covered?red(a.incorrect,a.incorrectPct+'%'):'<span class="empty-cell">–</span>'}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="empty">No agents</td></tr>';
+    const list=d.flagged.filter(mine);
+    document.getElementById('qSopFlagged').innerHTML = list.length ? list.map(f=>`<tr>
+      <td><a class="tkt-link" href="${esc(f.url)}" target="_blank" rel="noopener">#${f.ticketId}</a><div class="ae">${esc(f.subject)}</div>
+        ${f.topic?`<div style="margin-top:6px"><span class="chip">${esc(f.topic)}</span></div>`:''}
+        <div class="ae" style="color:var(--accent)">Reviewed by Claude${f.reviewedAt?' · '+qWhen(f.reviewedAt):''}</div></td>
+      <td>${esc(f.name)}</td><td class="mono">${qWhen(f.resolvedAt)}</td>
+      <td>${esc(f.sopRule)}${f.sopUrl?`<div class="ae" style="margin-top:6px"><a class="tkt-link" href="${esc(f.sopUrl)}" target="_blank" rel="noopener">📋 ${esc(f.sopTitle||'Open SOP')}</a></div>`:''}</td>
+      <td>${esc(f.agentAction)}${f.reason?`<div class="ae" style="color:var(--danger);margin-top:6px">${esc(f.reason)}</div>`:''}</td></tr>`).join('')
+      : `<tr><td colspan="5" class="empty">No flagged tickets${t.reviewed?'':' — none reviewed in this period yet (the SOP review runs hourly)'}</td></tr>`;
   } else {
     const rows=d.agents.filter(mine);
     document.getElementById('qCsatSummary').innerHTML = rows.length ? rows.map(a=>`<tr>${person(a)}

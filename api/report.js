@@ -43,18 +43,19 @@ function flagFor(metric, value, thresholds) {
 }
 
 /**
- * CSAT ratings and empathy checks for a period, for the reports. Each part is
+ * CSAT ratings, empathy checks and SOP checks for a period, for the reports. Each part is
  * null when not wanted, or { unavailable: message } if it couldn't be read, so
  * a Freshdesk hiccup never stops a report.
  */
-async function loadCustomerExperience(fromDate, toDate, { csat = true, empathy = true } = {}) {
-  const [csatRes, empRes] = await Promise.allSettled([
+async function loadCustomerExperience(fromDate, toDate, { csat = true, empathy = true, sop = false } = {}) {
+  const [csatRes, empRes, sopRes] = await Promise.allSettled([
     csat ? Q.fetchCsatRatings(fromDate, toDate) : Promise.resolve(null),
     empathy ? D.getEmpathyRange(fromDate, toDate) : Promise.resolve(null),
+    sop ? D.getSopRange(fromDate, toDate) : Promise.resolve(null),
   ]);
   const part = (r, label) => r.status === 'fulfilled' ? r.value
     : (console.error(`${label}:`, r.reason?.message), { unavailable: `${label} could not be loaded` });
-  return { ratings: part(csatRes, 'CSAT'), empathyRows: part(empRes, 'Empathy') };
+  return { ratings: part(csatRes, 'CSAT'), empathyRows: part(empRes, 'Empathy'), sopRows: part(sopRes, 'SOP checks') };
 }
 const cxList = (x) => Array.isArray(x) ? x : null;
 
@@ -106,7 +107,7 @@ async function buildRangeReports(fromDate, toDate, options = {}) {
 }
 
 async function buildReports(fromDate, toDate, options, monthKey) {
-  const selected = options.selected || ['resolved_closed','a2p','ghl','custom','avg_response','first_reply','sla','late_shifts','off_breaks','csat','empathy'];
+  const selected = options.selected || ['resolved_closed','a2p','ghl','custom','avg_response','first_reply','sla','late_shifts','off_breaks','csat','empathy','sop'];
 
   // thresholds
   const thresholds = thresholdsFromRows(await D.getThresholds());
@@ -120,9 +121,9 @@ async function buildReports(fromDate, toDate, options, monthKey) {
     D.getBreakLogRange(fromDate, toDate),
     D.getMissedShiftsRange(fromDate, toDate),
     // CSAT / empathy for the same period; stored with monthly reports as a snapshot
-    loadCustomerExperience(fromDate, toDate, { csat: selected.includes('csat'), empathy: selected.includes('empathy') }),
+    loadCustomerExperience(fromDate, toDate, { csat: selected.includes('csat'), empathy: selected.includes('empathy'), sop: selected.includes('sop') }),
   ]);
-  const ratings = cxList(cx.ratings), empathyRows = cxList(cx.empathyRows);
+  const ratings = cxList(cx.ratings), empathyRows = cxList(cx.empathyRows), sopRows = cxList(cx.sopRows);
   // reply times (working hours) from response_events; null -> fall back to the older daily figures
   const respEvents = await D.getResponseEventsRange(fromDate, toDate).catch(e => {
     if (!/schema cache/.test(e.message)) console.error('reply times:', e.message); return null; });
@@ -222,6 +223,16 @@ async function buildReports(fromDate, toDate, options, monthKey) {
       }
     }
 
+    // SOP checks: tickets whose agency SOP covers the topic, and the ones handled against it
+    let sop = null;
+    if (selected.includes('sop')) {
+      if (sopRows) {
+        const mine = sopRows.filter(r => r.agent_email === email);
+        sop = { ...Q.sopTotals(mine), incorrectList: Q.sopIncorrectList(mine) };
+        if (sop.incorrect) concerns.push(`${sop.incorrect} ticket${sop.incorrect===1?'':'s'} resolved against the agency SOP`);
+      } else sop = { unavailable: cx.sopRows?.unavailable };
+    }
+
     reports.push({
       email, name: a.name, monthKey, range,
       weekly,
@@ -236,7 +247,7 @@ async function buildReports(fromDate, toDate, options, monthKey) {
       lateDetail: a.late.map(l=>({date:l.log_date, lateMin:l.late_min})),
       missedDetail: a.missed.map(x=>({ start:x.scheduled_start, end:x.scheduled_end })),
       breakDetail: a.breaks.map(b=>({date:b.log_date, lateMin:b.late_min})),
-      csat, empathy,
+      csat, empathy, sop,
       flags, concerns, selected,
     });
   }
@@ -252,6 +263,7 @@ async function buildReports(fromDate, toDate, options, monthKey) {
       return { avgResponseMin: t.avgResponseMin, firstReplyMin: t.firstReplyMin, responses: t.responses, firstReplies: t.firstReplies }; })() : {}),
     csat: ratings ? Q.csatTotals(ratings.filter(r => tracked.has(r.email))) : null,
     empathy: empathyRows ? Q.empathyTotals(empathyRows.filter(r => tracked.has(r.agent_email))) : null,
+    sop: sopRows ? Q.sopTotals(sopRows.filter(r => tracked.has(r.agent_email))) : null,
   };
   for (const r of reports) r.teamAvg = teamAvg;
 
@@ -540,6 +552,42 @@ function generatePDF(report) {
       }
     }
 
+    // ── SOP compliance: resolutions checked against the agency SOP (Notion) ──
+    const sp = report.sop;   // absent on reports generated before this existed
+    if (inc('sop') && sp) {
+      sectionTitle('SOP compliance', `${month} · resolved/closed tickets checked against the agency SOP`, 90);
+      if (sp.unavailable) note(`SOP: ${sp.unavailable}.`);
+      else if (!sp.reviewed) note(`No tickets were checked against an SOP in this ${unit}. SOP checks started on Oct 28, 2026.`);
+      else {
+        drawTable([{ label:'SOP', width:W - 398 }, { label:'Reviewed', width:64, align:'right' }, { label:'No SOP', width:58, align:'right' },
+          { label:'Not covered', width:72, align:'right' }, { label:'Followed', width:64, align:'right' }, { label:'Incorrect', width:64, align:'right' },
+          { label:'Incorrect %', width:76, align:'right' }],
+          [['This agent', String(sp.reviewed), String(sp.noSop), String(sp.notCovered), String(sp.followed),
+            sp.incorrect ? { text:String(sp.incorrect), color:FLAG_COLOR.red } : '0',
+            sp.incorrectPct != null ? { text:`${sp.incorrectPct}%`, color: sp.incorrect ? FLAG_COLOR.red : undefined } : '–'],
+           ...(ta.sop ? [['Team', String(ta.sop.reviewed), String(ta.sop.noSop), String(ta.sop.notCovered), String(ta.sop.followed),
+             String(ta.sop.incorrect), ta.sop.incorrectPct != null ? `${ta.sop.incorrectPct}%` : '–']] : [])]);
+        const list = sp.incorrectList || [];
+        if (list.length) {
+          ensure(40); y += 4;
+          doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.ink).text('Tickets resolved against the SOP', M, y); y = doc.y + 6;
+          for (const it of list) {
+            const head = `#${it.ticketId}  ·  ${it.date ? dayLabel(it.date) : ''}${it.topic ? '  ·  ' + it.topic : ''}`;
+            const rule = `SOP: ${it.sopRule || '–'}`, did = `Agent: ${it.agentAction || it.reason || '–'}`;
+            doc.font('Helvetica').fontSize(8.5);
+            const h1 = doc.heightOfString(rule, { width:W - 14 }), h2 = doc.heightOfString(did, { width:W - 14 });
+            const h = 14 + h1 + 3 + h2;
+            ensure(h + 8);
+            doc.rect(M, y, 3, h).fill(FLAG_COLOR.red);
+            doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.ink).text(head, M + 10, y, { width:W - 14, lineBreak:false });
+            doc.font('Helvetica').fontSize(8.5).fillColor(C.body).text(rule, M + 10, y + 13, { width:W - 14 });
+            doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(C.muted).text(did, M + 10, y + 13 + h1 + 3, { width:W - 14 });
+            y += h + 8;
+          }
+        }
+      }
+    }
+
     // Day/minutes grid used by the late-shift and break detail sections.
     const drawDayGrid = (items, color, perRow) => {
       const gap = 10, cw = (W - gap*(perRow-1)) / perRow, ch = 22;
@@ -706,6 +754,7 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       if (inc('late_shifts')  && t.missedShifts) items.push(`${t.missedShifts} shift${t.missedShifts === 1 ? '' : 's'} with no clock-in`);
       if (inc('csat')    && f.csat_pct === 'red') items.push(`${r.csat.csatPct}% CSAT`);
       if (inc('empathy') && f.empathy_missed_pct === 'red') items.push(`empathy missed with ${r.empathy.missed} of ${r.empathy.upset} upset`);
+      if (inc('sop') && r.sop?.incorrect) items.push(`${r.sop.incorrect} ticket${r.sop.incorrect === 1 ? '' : 's'} against the agency SOP`);
       if (items.length) attention.push([r.name || r.email, items.join(', ')]);
     }
     {
@@ -752,6 +801,10 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       sub: tcs.total ? `${tcs.total} ratings · ${tcs.negative} negative` : 'no ratings', flag:teamCsatFlag });
     if (inc('empathy') && tem) cards.push({ label:'Empathy missed', value:String(tem.missed),
       sub: tem.upset ? `of ${tem.upset} upset · ${tem.missedPct}%` : (tem.checked ? 'no upset customers' : 'no data'), flag:teamEmpFlag });
+    const tsop = agents[0]?.teamAvg?.sop;   // absent on reports generated before SOP checks existed
+    if (inc('sop') && tsop) cards.push({ label:'Against SOP', value:String(tsop.incorrect),
+      sub: tsop.covered ? `of ${tsop.covered} covered · ${tsop.incorrectPct}%` : (tsop.reviewed ? 'none covered by an SOP' : 'no data'),
+      flag: tsop.covered ? (tsop.incorrect ? 'red' : 'green') : undefined });
     if (cards.length) {
       sectionTitle('Team at a glance');
       const perRow = 4, gap = 10, cw = (W - gap*(perRow-1)) / perRow, ch = 64;
@@ -874,6 +927,45 @@ function generateTeamPDF(monthKey, reports, thresholds = DEFAULT_THRESHOLDS) {
       sectionTitle('Customer experience', noteText, (rows.length + 2) * ROW_H);
       drawTable([{ label:'Agent', width:W - cols.reduce((s, c) => s + c.width, 0) }, ...cols], rows,
         { totalRow: row('Team', tcs, tem, teamCsatFlag, teamEmpFlag) });
+    }
+
+    // ── SOP compliance by agent: resolutions checked against the agency SOP (Notion) ──
+    if (inc('sop') && tsop) {
+      const red = (n) => n ? { text:String(n), color:FLAG_COLOR.red } : '0';
+      const sopRow = (name, t) => [name, String(t?.reviewed ?? 0), String(t?.noSop ?? 0), String(t?.notCovered ?? 0), String(t?.followed ?? 0),
+        red(t?.incorrect), t?.incorrectPct != null ? (t.incorrect ? { text:`${t.incorrectPct}%`, color:FLAG_COLOR.red } : `${t.incorrectPct}%`) : '–'];
+      const withSop = agents.filter(r => r.sop && !r.sop.unavailable);
+      if (!tsop.reviewed) {
+        sectionTitle('SOP compliance', 'Resolved/closed tickets checked against the agency SOP');
+        doc.font('Helvetica').fontSize(9).fillColor(C.muted).text(`No tickets were checked against an SOP in this ${unit}. SOP checks started on Oct 28, 2026.`, M, y, { width:W }); y = doc.y + 8;
+      } else {
+        const rows = withSop.filter(r => r.sop.reviewed)
+          .sort((a, b) => (b.sop.incorrect || 0) - (a.sop.incorrect || 0) || (b.sop.covered || 0) - (a.sop.covered || 0))
+          .map(r => sopRow(r.name || r.email, r.sop));
+        sectionTitle('SOP compliance', 'Only tickets whose SOP covers the topic are judged · sorted by incorrect', (rows.length + 2) * ROW_H);
+        drawTable([{ label:'Agent', width:W - 398 }, { label:'Reviewed', width:64, align:'right' }, { label:'No SOP', width:58, align:'right' },
+          { label:'Not covered', width:72, align:'right' }, { label:'Followed', width:64, align:'right' }, { label:'Incorrect', width:64, align:'right' },
+          { label:'Incorrect %', width:76, align:'right' }], rows, { totalRow: sopRow('Team', tsop) });
+        // every flagged ticket, with the agent
+        const list = withSop.flatMap(r => (r.sop.incorrectList || []).map(it => ({ ...it, agent: r.name || r.email })));
+        if (list.length) {
+          ensure(40); y += 4;
+          doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.ink).text('Tickets resolved against the SOP', M, y); y = doc.y + 6;
+          for (const it of list) {
+            const head = `#${it.ticketId}  ·  ${it.agent}  ·  ${it.date ? dayLabel(it.date) : ''}${it.topic ? '  ·  ' + it.topic : ''}`;
+            const rule = `SOP: ${it.sopRule || '–'}`, did = `Agent: ${it.agentAction || it.reason || '–'}`;
+            doc.font('Helvetica').fontSize(8.5);
+            const h1 = doc.heightOfString(rule, { width:W - 14 }), h2 = doc.heightOfString(did, { width:W - 14 });
+            const h = 14 + h1 + 3 + h2;
+            ensure(h + 8);
+            doc.rect(M, y, 3, h).fill(FLAG_COLOR.red);
+            doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.ink).text(head, M + 10, y, { width:W - 14, lineBreak:false, ellipsis:true });
+            doc.font('Helvetica').fontSize(8.5).fillColor(C.body).text(rule, M + 10, y + 13, { width:W - 14 });
+            doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(C.muted).text(did, M + 10, y + 13 + h1 + 3, { width:W - 14 });
+            y += h + 8;
+          }
+        }
+      }
     }
 
     // ── Ticket statuses (team totals) ──
@@ -1143,7 +1235,40 @@ function generateGroupPDF(data, { monthKey, thresholds = DEFAULT_THRESHOLDS } = 
         { totalRow: row('All groups', cx.totals.csat, cx.totals.empathy) });
     };
 
-    if (!groups.length) drawCustomerExperience();
+    // ── SOP compliance by group: resolutions checked against the agency SOP (Notion) ──
+    const drawSop = () => {
+      const cx = data.cx;
+      if (!cx || !cx.totals.sop || !cx.totals.sop.reviewed) return;
+      const rows = cx.groups.filter(g => g.sop?.reviewed)
+        .sort((a, b) => (b.sop.incorrect || 0) - (a.sop.incorrect || 0) || (b.sop.reviewed || 0) - (a.sop.reviewed || 0));
+      const red = (n) => n ? { text:String(n), color:FLAG_COLOR.red } : '0';
+      const row = (name, t) => [name, String(t?.reviewed ?? 0), String(t?.noSop ?? 0), String(t?.notCovered ?? 0), String(t?.followed ?? 0),
+        red(t?.incorrect), t?.incorrectPct != null ? (t.incorrect ? { text:`${t.incorrectPct}%`, color:FLAG_COLOR.red } : `${t.incorrectPct}%`) : '–'];
+      L.sectionTitle('SOP compliance by group', 'Only tickets whose SOP covers the topic are judged', (rows.length + 2) * L.ROW_H);
+      L.table([{ label:'Group', width:L.W - 398 }, { label:'Reviewed', width:64, align:'right' }, { label:'No SOP', width:58, align:'right' },
+        { label:'Not covered', width:72, align:'right' }, { label:'Followed', width:64, align:'right' }, { label:'Incorrect', width:64, align:'right' },
+        { label:'Incorrect %', width:76, align:'right' }], rows.map(g => row(g.name, g.sop)), { totalRow: row('All groups', cx.totals.sop) });
+      const list = cx.sopIncorrect || [];
+      if (list.length) {
+        L.ensure(40); L.y += 4;
+        doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.ink).text('Tickets resolved against the SOP', L.M, L.y); L.y = doc.y + 6;
+        for (const it of list) {
+          const head = `#${it.ticketId}  ·  ${it.agent}  ·  ${it.group}  ·  ${it.date ? dayLabel(it.date) : ''}${it.topic ? '  ·  ' + it.topic : ''}`;
+          const rule = `SOP: ${it.sopRule || '–'}`, did = `Agent: ${it.agentAction || it.reason || '–'}`;
+          doc.font('Helvetica').fontSize(8.5);
+          const h1 = doc.heightOfString(rule, { width:L.W - 14 }), h2 = doc.heightOfString(did, { width:L.W - 14 });
+          const h = 14 + h1 + 3 + h2;
+          L.ensure(h + 8);
+          doc.rect(L.M, L.y, 3, h).fill(FLAG_COLOR.red);
+          doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.ink).text(head, L.M + 10, L.y, { width:L.W - 14, lineBreak:false, ellipsis:true });
+          doc.font('Helvetica').fontSize(8.5).fillColor(C.body).text(rule, L.M + 10, L.y + 13, { width:L.W - 14 });
+          doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(C.muted).text(did, L.M + 10, L.y + 13 + h1 + 3, { width:L.W - 14 });
+          L.y += h + 8;
+        }
+      }
+    };
+
+    if (!groups.length) { drawCustomerExperience(); drawSop(); }
 
     if (groups.length) {
       const totals = data.totals;
@@ -1155,6 +1280,7 @@ function generateGroupPDF(data, { monthKey, thresholds = DEFAULT_THRESHOLDS } = 
         { totalRow:['All groups', ...cells(totals)] });
 
       drawCustomerExperience();
+      drawSop();
 
       // ── One section per group ──
       for (const g of groups) {

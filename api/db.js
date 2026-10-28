@@ -430,6 +430,19 @@ async function getEmpathyRange(fromDate, toDate) {
   return all;
 }
 
+// ── SOP CHECKS (Claude review against the agency SOP, scripts/sop-review/) ──
+async function getSopRange(fromDate, toDate) {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await db().from('sop_checks').select('*').eq('review_source', 'claude')
+      .gte('resolved_date', fromDate).lte('resolved_date', toDate).order('resolved_at', { ascending: false }).range(from, from + 999);
+    if (error) throw new Error('getSopRange: ' + error.message);
+    all.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return all;
+}
+
 // ── GROUP DAILY STATS (per agent × ticket group × day) ──
 // Replaces an agent's rows for one stat_date: upserts the groups present now and
 // drops groups that no longer have tickets (e.g. a ticket moved to another group).
@@ -505,7 +518,7 @@ module.exports = {
   upsertSlaDaily, getSlaRange,
   replaceGroupStats, getGroupStatsRange,
   upsertMissedShift, deleteMissedShift, getMissedShiftsRange,
-  getEmpathyResolvedAt, upsertEmpathyCheck, getEmpathyRange,
+  getEmpathyResolvedAt, upsertEmpathyCheck, getEmpathyRange, getSopRange,
   getTicketScans, upsertTicketScans, getAgentActivity, upsertAgentActivity,
   upsertResponseEvents, getResponseEventsRange, getResponseEventsSince, getResponseEventsMissingWorking,
   getOpenSnapshotEmails, upsertOpenSnapshots, getOpenSnapshots, getIdleOverlapping, getAgentResponseEvents,

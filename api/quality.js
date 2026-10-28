@@ -88,6 +88,31 @@ function handlingLabel(s) {
   return s == null ? null : s >= 4 ? 'Minor miss' : s === 3 ? 'Partial' : 'Major miss';
 }
 
+// ── SOP (sop_checks, Claude review against the agency SOP in Notion) ──
+// Only tickets whose SOP covers the topic are judged; 'no_sop' and
+// 'not_covered' are never flagged.
+function sopTotals(rows) {
+  const t = { reviewed: rows.length, noSop: 0, notCovered: 0, followed: 0, incorrect: 0 };
+  for (const r of rows) {
+    if (r.verdict === 'no_sop') t.noSop++;
+    else if (r.verdict === 'not_covered') t.notCovered++;
+    else if (r.verdict === 'followed') t.followed++;
+    else if (r.verdict === 'incorrect') t.incorrect++;
+  }
+  t.covered = t.followed + t.incorrect;
+  t.incorrectPct = pct(t.incorrect, t.covered);
+  return t;
+}
+
+// Flagged (incorrect) tickets: ticket, date, topic, what the SOP says and what the agent did.
+function sopIncorrectList(rows) {
+  return rows.filter(r => r.verdict === 'incorrect').map(r => ({
+    ticketId: r.ticket_id, url: r.ticket_url || ticketUrl(r.ticket_id), date: r.resolved_date,
+    topic: r.topic || '', sopTitle: r.sop_title || '', sopUrl: r.sop_url || '',
+    sopRule: r.sop_rule || '', agentAction: r.agent_action || '', reason: r.reason || '',
+  }));
+}
+
 // Freshdesk group id -> name (0 = no group).
 async function fdGroupNames() {
   const out = { 0: 'No group' };
@@ -106,23 +131,33 @@ async function fdGroupNames() {
  * part is null if it couldn't be loaded.
  */
 async function groupCustomerExperience(fromDate, toDate, trackedEmails) {
-  const [ratingsRes, rowsRes, namesRes] = await Promise.allSettled([
-    fetchCsatRatings(fromDate, toDate), D.getEmpathyRange(fromDate, toDate), fdGroupNames(),
+  const [ratingsRes, rowsRes, namesRes, sopRes] = await Promise.allSettled([
+    fetchCsatRatings(fromDate, toDate), D.getEmpathyRange(fromDate, toDate), fdGroupNames(), D.getSopRange(fromDate, toDate),
   ]);
   const ratings = ratingsRes.status === 'fulfilled' ? ratingsRes.value.filter(r => trackedEmails.has(r.email)) : null;
   const rows = rowsRes.status === 'fulfilled' ? rowsRes.value.filter(r => trackedEmails.has(r.agent_email)) : null;
   const names = namesRes.status === 'fulfilled' ? namesRes.value : { 0: 'No group' };
+  const sop = sopRes.status === 'fulfilled' ? sopRes.value.filter(r => trackedEmails.has(r.agent_email)) : null;
   const grouped = rows ? rows.filter(r => r.group_id != null) : null;   // group known
-  const ids = new Set([...(ratings || []).map(r => +r.groupId || 0), ...(grouped || []).map(r => +r.group_id || 0)]);
+  const ids = new Set([...(ratings || []).map(r => +r.groupId || 0), ...(grouped || []).map(r => +r.group_id || 0),
+    ...(sop || []).map(r => +r.group_id || 0)]);
   const groups = [...ids].map(id => ({
     id, name: names[id] || `Group ${id}`,
     csat: ratings ? csatTotals(ratings.filter(r => (+r.groupId || 0) === id)) : null,
     empathy: grouped ? empathyTotals(grouped.filter(r => (+r.group_id || 0) === id)) : null,
+    sop: sop ? sopTotals(sop.filter(r => (+r.group_id || 0) === id)) : null,
   }));
-  return { groups, totals: { csat: ratings ? csatTotals(ratings) : null, empathy: rows ? empathyTotals(rows) : null },
+  // flagged SOP tickets with agent and group, for the Group PDF
+  const sopIncorrect = sop ? sopIncorrectList(sop).map((it, i) => {
+    const r = sop.filter(x => x.verdict === 'incorrect')[i];
+    return { ...it, agent: r.agent_name || r.agent_email, group: names[+r.group_id || 0] || `Group ${r.group_id}` };
+  }) : [];
+  return { groups, sopIncorrect,
+    totals: { csat: ratings ? csatTotals(ratings) : null, empathy: rows ? empathyTotals(rows) : null, sop: sop ? sopTotals(sop) : null },
     // rows checked before group_id was recorded have no group
     unknownGroup: rows ? rows.filter(r => r.group_id == null).length : 0 };
 }
 
-module.exports = { fetchCsatRatings, csatTotals, csatTone, empathyVerdict, empathyTotals, empathyMissedList, handlingLabel, fdAgentEmails,
+module.exports = { fetchCsatRatings, csatTotals, csatTone, empathyVerdict, empathyTotals, empathyMissedList, handlingLabel,
+  sopTotals, sopIncorrectList, fdAgentEmails,
   fdGroupNames, groupCustomerExperience, ticketUrl, pct };

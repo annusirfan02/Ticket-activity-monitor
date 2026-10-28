@@ -1260,6 +1260,30 @@ app.get('/api/quality/empathy', authMw, async (req,res)=>{
   }
 });
 
+// SOP: per agent + incorrect tickets (from sop_checks, Claude review vs the agency SOP)
+app.get('/api/quality/sop', authMw, async (req,res)=>{
+  try {
+    const range = qualityRange(req.query);
+    if (range.error) return res.status(400).json({ok:false,error:range.error});
+    const [rows, names] = await Promise.all([D.getSopRange(range.from, range.to), agentNames()]);
+    const byEmail = {};
+    for (const email of Object.keys(names)) byEmail[email] = [];
+    for (const r of rows) (byEmail[r.agent_email] = byEmail[r.agent_email] || []).push(r);
+    const agents = Object.entries(byEmail).map(([email, list]) => ({ email, name: names[email] || list[0]?.agent_name || email, ...Q.sopTotals(list) }))
+      .sort((a, b) => b.incorrect - a.incorrect || b.covered - a.covered || a.name.localeCompare(b.name));
+    const flagged = rows.filter(r => r.verdict === 'incorrect').map(r => ({
+      ticketId:r.ticket_id, url:r.ticket_url || ticketUrl(r.ticket_id), subject:r.subject, email:r.agent_email, name:r.agent_name,
+      resolvedAt:r.resolved_at, reviewedAt:r.reviewed_at, topic:r.topic, summary:r.summary,
+      sopTitle:r.sop_title, sopUrl:r.sop_url, sopRule:r.sop_rule, agentAction:r.agent_action, reason:r.reason,
+    }));
+    res.json({ ok:true, from:range.from, to:range.to, totals:Q.sopTotals(rows), agents, flagged });
+  } catch(e){
+    if (/sop_checks/.test(e.message) && /schema cache/.test(e.message))
+      return res.status(503).json({ok:false,error:'SOP table is not set up yet — run the sop_checks SQL from db/schema.sql in Supabase'});
+    res.status(500).json({ok:false,error:e.message});
+  }
+});
+
 // CSAT: Freshdesk satisfaction ratings, read live (api/quality.js).
 app.get('/api/quality/csat', authMw, async (req,res)=>{
   try {

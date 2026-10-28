@@ -241,6 +241,36 @@ alter table empathy_checks add column if not exists ai_frustration smallint;
 alter table empathy_checks add column if not exists ai_handling    smallint;
 alter table empathy_checks add column if not exists ai_coaching    text;
 
+-- ── SOP check: was a resolved ticket handled the way the agency's SOP says? ──
+-- Claude routine (scripts/sop-review/) reads the agency SOP in Notion. One row
+-- per ticket. verdict: 'no_sop' (agency has no SOP), 'not_covered' (SOP says
+-- nothing about this topic), 'followed', 'incorrect' (flagged).
+-- review_source: 'claude' = reviewed; 'recheck' = queued for a re-review.
+create table if not exists sop_checks (
+  ticket_id       bigint primary key,
+  agent_email     text not null,
+  agent_name      text,
+  subject         text,
+  ticket_url      text,
+  group_id        bigint,
+  resolved_at     timestamptz,
+  resolved_date   date,                 -- in DISPLAY_TZ
+  relationship_id text,                 -- agency, e.g. 0-116-776
+  review_source   text default 'claude',
+  verdict         text,
+  topic           text,                 -- what the ticket was about
+  sop_title       text,
+  sop_url         text,
+  sop_rule        text,                 -- what the SOP says for this topic
+  agent_action    text,                 -- what the agent did instead (incorrect only)
+  summary         text,
+  reason          text,
+  reviewed_at     timestamptz,
+  reviewed_model  text
+);
+create index if not exists idx_sop_date  on sop_checks(resolved_date);
+create index if not exists idx_sop_agent on sop_checks(agent_email);
+
 -- ── Reply times: one row per agent reply that answered a waiting customer ──
 -- (api/responses.js). wait_start = the customer's first unanswered message;
 -- wait_working_min counts only the replying agent's rostered shifts.

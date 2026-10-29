@@ -1,6 +1,7 @@
 // Light / dark theme, shared by the dashboard, /live and /hourly.
 // Loaded in <head> (not deferred) so the saved theme applies before first paint.
-// The choice is kept per browser in localStorage ('am_theme'); default is dark.
+// The choice is kept per browser in localStorage ('am_theme'); default is dark
+// unless the page sets data-default-theme on <html>.
 (function () {
   var KEY = 'am_theme';
   var css = [
@@ -41,8 +42,10 @@
   // a CSS variable's current value, for things drawn in JS (charts)
   window.themeVar = function (name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); };
 
-  apply(saved() || 'dark');
+  // a page can set its own default with <html data-default-theme="light">
+  function fallback() { return document.documentElement.getAttribute('data-default-theme') || 'dark'; }
+  apply(saved() || fallback());
   document.addEventListener('DOMContentLoaded', paintButtons);
   // another tab changed the theme
-  window.addEventListener('storage', function (e) { if (e.key === KEY) apply(e.newValue || 'dark'); });
+  window.addEventListener('storage', function (e) { if (e.key === KEY) apply(e.newValue || fallback()); });
 })();

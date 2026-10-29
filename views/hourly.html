@@ -1,53 +1,15 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-default-theme="light">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <meta name="robots" content="noindex, nofollow"/>
 <title>Hourly View</title>
 <script src="/theme.js"></script>
+<link rel="stylesheet" href="/theme-d.css"/>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
-:root{
-  --bg:#0d0f14;--surface:#13161e;--card:#181c26;--border:#1f2436;
-  --accent:#00e5a0;--warn:#ffb800;--danger:#ff4d6a;--info:#4d9fff;--purple:#a064ff;
-  --muted:#2e3347;--text:#dde2f0;--dim:#636b8a;
-  --mono:'IBM Plex Mono',monospace;--sans:'IBM Plex Sans',sans-serif;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh}
-.lock{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:16px}
-.lock-box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:32px;width:100%;max-width:360px}
-.lock-box h2{font-size:18px;margin-bottom:6px}.lock-box p{font-size:12px;color:var(--dim);margin-bottom:20px}
-.lock-box input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:11px 13px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;margin-bottom:12px}
-.lock-box input:focus{border-color:var(--accent)}
-.err{color:var(--danger);font-size:12px;font-family:var(--mono);margin-bottom:10px;display:none}
-.wrap{max-width:1200px;margin:0 auto;padding:22px 16px}
-.btn{background:transparent;border:1px solid var(--border);color:var(--dim);border-radius:6px;padding:6px 13px;font-size:12px;font-family:var(--mono);cursor:pointer}
-.btn:hover{border-color:var(--accent);color:var(--accent)}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#0d0f14;font-weight:600;width:100%;padding:11px}
-.panel{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
-.panel-head{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:10px}
-.panel-title{font-size:11px;font-family:var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
-.switcher{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.switcher select,.switcher input{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 11px;color:var(--text);font-family:var(--mono);font-size:12px;outline:none}
-.tbl-scroll{overflow-x:auto}
-table{width:100%;border-collapse:collapse;min-width:700px}
-th{text-align:left;padding:9px 14px;font-size:10px;font-family:var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border);background:rgba(255,255,255,.015);white-space:nowrap}
-td{padding:11px 14px;font-size:12px;border-bottom:1px solid var(--border);vertical-align:middle}
-tr:last-child td{border-bottom:none}
-.mono{font-family:var(--mono);font-size:11px}
-.num{font-family:var(--mono);font-size:13px;font-weight:600}
-.empty-cell{color:var(--dim);font-size:11px}
-.empty{padding:30px 16px;text-align:center;color:var(--dim);font-size:12px}
-#toast{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 16px;font-size:12px;font-family:var(--mono);opacity:0;transition:opacity .2s;pointer-events:none}
-#toast.show{opacity:1}#toast.err{border-color:var(--danger);color:var(--danger)}
-.hidden{display:none}
-.tabs{display:flex;gap:2px;margin-bottom:20px;border-bottom:1px solid var(--border);flex-wrap:wrap;align-items:center}
-.tab{padding:10px 16px;font-size:13px;color:var(--dim);cursor:pointer;border-bottom:2px solid transparent;font-family:var(--mono)}
-.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
-.tab:hover{color:var(--text)}
-.tabs-tools{margin-left:auto;display:flex;gap:6px;padding-bottom:6px}
+#app:not(.hidden){display:flex}
+.panel-head .panel-title{font-size:16px}
 </style>
 </head>
 <body>
@@ -62,13 +24,16 @@ tr:last-child td{border-bottom:none}
   </div>
 </div>
 
-<div class="wrap hidden" id="app">
-  <div class="tabs">
-    <div class="tab active" data-tab="hourly" onclick="switchTab('hourly')">Hourly View</div>
-    <div class="tab" data-tab="breaks" onclick="switchTab('breaks')">Break Compliance</div>
-    <div class="tabs-tools">
-      <button class="theme-btn" onclick="toggleTheme()">☀ Light</button>
-      <button class="btn" onclick="lockPage()">Lock</button>
+<div class="page hidden" id="app">
+  <div class="page-head">
+    <div class="brand"><div class="logo" aria-hidden="true">AM</div><div><div class="page-date">Agent activity</div><h1 class="page-title" id="pageTitle">Hourly View</h1></div></div>
+    <div class="topbar-right">
+      <div class="toggle-row" role="tablist">
+        <button class="pill-tab active" data-tab="hourly" data-label="Hourly View" onclick="switchTab('hourly')">Hourly View</button>
+        <button class="pill-tab" data-tab="breaks" data-label="Break Compliance" onclick="switchTab('breaks')">Break Compliance</button>
+      </div>
+      <button class="theme-btn" onclick="toggleTheme()">Theme</button>
+      <button class="logout" onclick="lockPage()">Lock</button>
     </div>
   </div>
 
@@ -141,7 +106,7 @@ async function showApp(){
 }
 // TABS
 function switchTab(t){
-  document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.dataset.tab===t));
+  document.querySelectorAll('.pill-tab').forEach(el=>{ el.classList.toggle('active',el.dataset.tab===t); if(el.dataset.tab===t) document.getElementById('pageTitle').textContent=el.dataset.label; });
   ['hourly','breaks'].forEach(n=>document.getElementById('tab-'+n).classList.toggle('hidden',n!==t));
   if(t==='breaks') bcLoad();
 }

@@ -13,6 +13,7 @@ const T        = require('./ticket-thread');
 const Q        = require('./quality');
 const RS       = require('./responses');
 const HR       = require('./hourly');
+const SC       = require('./scorecard');
 
 const app = express();
 app.use(express.json());
@@ -1349,6 +1350,39 @@ app.get('/api/hourly', hourlyMw, async (req,res)=>{
   } catch(e){ console.error('hourly:', e.message); res.status(500).json({ok:false,error:e.message}); }
 });
 
+// ── WEEKLY SCORECARD (Tickets seat): stored snapshots, newest first ──
+// /scorecard is a public, read-only page meant to be shared. Its data has no
+// agent emails; the snapshots themselves are only built by the cron or by an
+// admin (generate, below).
+const scorecardTableMissing = (e) => /weekly_scorecards/.test(e.message) && /schema cache|does not exist/.test(e.message);
+app.get('/scorecard', (req,res)=>{
+  res.set({ 'X-Robots-Tag':'noindex, nofollow', 'Cache-Control':'no-store' });
+  res.sendFile(path.join(__dirname, '../views/scorecard.html'));
+});
+app.get('/api/public/scorecards', async (req,res)=>{
+  try {
+    const rows = await D.getScorecards(26);
+    const scorecards = rows.map(r => ({ ...r.data, agents: (r.data.agents || []).map(({ email, ...a }) => a) }));
+    res.json({ ok:true, tz: TZ, scorecards });
+  } catch(e){
+    if (scorecardTableMissing(e)) return res.status(503).json({ok:false,error:'Scorecard table is not set up yet — run the weekly_scorecards SQL from db/schema.sql in Supabase'});
+    res.status(500).json({ok:false,error:e.message});
+  }
+});
+// body: { weekStart?: 'YYYY-MM-DD' } — any day of the week; default = last full week
+app.post('/api/scorecards/generate', authMw, async (req,res)=>{
+  try {
+    const day = (req.body||{}).weekStart || SC.lastFullWeekStart();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ok:false,error:'weekStart must be YYYY-MM-DD'});
+    const { from } = SC.weekBounds(day);
+    if (from > SC.lastFullWeekStart()) return res.status(400).json({ok:false,error:'That week has not finished yet'});
+    res.json({ ok:true, scorecard: await SC.generateAndSave(from) });
+  } catch(e){
+    if (scorecardTableMissing(e)) return res.status(503).json({ok:false,error:'Scorecard table is not set up yet — run the weekly_scorecards SQL from db/schema.sql in Supabase'});
+    res.status(500).json({ok:false,error:e.message});
+  }
+});
+
 // ── THRESHOLDS ──
 app.get('/api/thresholds', authMw, async (req,res)=>{
   try {
@@ -1431,10 +1465,18 @@ app.post('/api/cron', async (req,res)=>{
         }
       } catch (e) { console.error('auto report:', e.message); }
     }
+    // Weekly scorecard: store last week's once it's over. Waits until Monday
+    // 12:00 UTC so Sunday is done everywhere and the overnight reviews are in.
+    let scorecard = null;
+    if (!(nowD.getUTCDay() === 1 && nowD.getUTCHours() < 12)) {
+      const wk = SC.lastFullWeekStart();
+      try { if (!(await D.hasScorecard(wk))) { await SC.generateAndSave(wk); scorecard = wk; } }
+      catch (e) { if (!scorecardTableMissing(e)) console.error('scorecard:', e.message); }
+    }
     let empathy = null;
     try { empathy = await runEmpathyChecks(r.empathyCandidates); }
     catch (e) { console.error('empathy:', e.message); }
-    res.json({ok:true, checked:r.agents.length, reportGen, empathy});
+    res.json({ok:true, checked:r.agents.length, reportGen, scorecard, empathy});
   }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });

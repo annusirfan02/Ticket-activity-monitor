@@ -504,6 +504,23 @@ async function getReportMonths() {
   return [...new Set((data||[]).map(r => r.month_key))];
 }
 
+// ── WEEKLY SCORECARDS (Tickets seat, one snapshot per Mon–Sun week) ──
+async function saveScorecard(weekStart, weekEnd, data) {
+  const { error } = await db().from('weekly_scorecards')
+    .upsert({ week_start: weekStart, week_end: weekEnd, data, generated_at: new Date().toISOString() }, { onConflict: 'week_start' });
+  if (error) throw new Error('saveScorecard: ' + error.message);
+}
+async function getScorecards(limit = 26) {
+  const { data, error } = await db().from('weekly_scorecards').select('*').order('week_start', { ascending: false }).limit(limit);
+  if (error) throw new Error('getScorecards: ' + error.message);
+  return data || [];
+}
+async function hasScorecard(weekStart) {
+  const { data, error } = await db().from('weekly_scorecards').select('week_start').eq('week_start', weekStart).limit(1);
+  if (error) throw new Error('hasScorecard: ' + error.message);
+  return !!(data && data.length);
+}
+
 module.exports = {
   db,
   getAgents, getActiveAgentEmails, addAgent, removeAgent, setAgentActive,
@@ -524,4 +541,5 @@ module.exports = {
   getOpenSnapshotEmails, upsertOpenSnapshots, getOpenSnapshots, getIdleOverlapping, getAgentResponseEvents,
   getThresholds, setThreshold, setThresholdRanges,
   saveReport, getReports, getReportMonths,
+  saveScorecard, getScorecards, hasScorecard,
 };

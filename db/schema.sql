@@ -322,3 +322,12 @@ create index if not exists idx_late_month    on late_shifts(month_key);
 create index if not exists idx_sla_email      on sla_daily(agent_email);
 create index if not exists idx_sla_month      on sla_daily(month_key);
 create index if not exists idx_reports_month  on monthly_reports(month_key);
+
+-- ── Weekly scorecard (Tickets seat): one snapshot per Mon–Sun week ──
+-- Built automatically after each week ends (cron), or from the Scorecard tab.
+create table if not exists weekly_scorecards (
+  week_start    date primary key,       -- Monday
+  week_end      date not null,          -- Sunday
+  data          jsonb not null,         -- measurables, per-agent figures, flagged tickets
+  generated_at  timestamptz default now()
+);

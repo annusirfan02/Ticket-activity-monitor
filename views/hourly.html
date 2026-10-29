@@ -77,6 +77,28 @@ tr:last-child td{border-bottom:none}
     </div>
     <div id="hrBody" style="padding:6px 18px 18px"><div class="empty">Pick a day and an agent, then Load</div></div>
   </div>
+
+  <div class="panel" style="margin-top:18px">
+    <div class="panel-head">
+      <div class="panel-title">☕ Break Compliance</div>
+      <div class="switcher">
+        <input type="date" id="bcDate" onchange="bcLoad()"/>
+        <label class="mono" style="color:var(--dim)">Agent:</label>
+        <select id="bcAgent" onchange="bcLoad()"><option value="">All agents</option></select>
+        <button class="btn" onclick="bcLoad()">↻ Load</button>
+      </div>
+    </div>
+    <div class="mono" style="color:var(--dim);font-size:11px;padding:10px 18px 4px">⚠️ Off-schedule breaks</div>
+    <div class="tbl-scroll"><table>
+      <thead><tr><th>Agent</th><th>Scheduled Break</th><th>Pressed At</th><th>Difference</th></tr></thead>
+      <tbody id="bcBreaks"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+    </table></div>
+    <div class="mono" style="color:var(--dim);font-size:11px;padding:14px 18px 4px;border-top:1px solid var(--border)">💤 Idle periods during shift (≥ threshold)</div>
+    <div class="tbl-scroll"><table>
+      <thead><tr><th>Agent</th><th>Inactive From</th><th>Until</th><th>Duration</th></tr></thead>
+      <tbody id="bcIdle"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+    </table></div>
+  </div>
 </div>
 <div id="toast"></div>
 
@@ -102,7 +124,8 @@ function lockPage(){ token=null; sessionStorage.removeItem('hr_token'); location
 async function showApp(){
   document.getElementById('lock').classList.add('hidden'); document.getElementById('app').classList.remove('hidden');
   try{ const r=await fetch('/api/config'); cfg=await r.json(); }catch(e){}
-  hrOpen();
+  await hrOpen();
+  bcOpen();
 }
 document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')unlock();});
 if(token) showApp();
@@ -154,6 +177,38 @@ async function hrLoad(){
         ${list('Breaks taken',s.breaks,'var(--purple)')}${list('Rostered breaks',s.plannedBreaks,'var(--dim)')}${list('Idle periods',s.idle,'var(--danger)')}`;
     }).join('<hr style="border:none;border-top:1px solid var(--border);margin:18px 0">');
   }catch(e){ box.innerHTML=`<div class="empty">Error: ${esc(e.message)}</div>`; }
+}
+
+// BREAK COMPLIANCE: off-schedule breaks and idle periods for a day
+function bcOpen(){
+  const d=document.getElementById('bcDate');
+  if(!d.value) d.value=new Date().toISOString().split('T')[0];   // break and idle logs are dated in UTC
+  const sel=document.getElementById('bcAgent');
+  sel.innerHTML='<option value="">All agents</option>'+[...document.getElementById('hrAgent').options].map(o=>`<option value="${esc(o.value)}">${esc(o.textContent)}</option>`).join('');
+  bcLoad();
+}
+const bcWho=i=>`<div style="font-weight:500">${esc(i.agent_name||i.agent_email)}</div><div class="mono" style="color:var(--dim);font-size:10px">${esc(i.agent_email)}</div>`;
+function bcMins(m){ m=Math.round(+m||0); if(m<=0) return '0m'; const h=Math.floor(m/60), r=m%60; return h?(r?`${h}h ${r}m`:`${h}h`):`${r}m`; }
+async function bcLoad(){
+  const date=document.getElementById('bcDate').value, agent=document.getElementById('bcAgent').value;
+  const qs=`date=${encodeURIComponent(date)}${agent?'&agent='+encodeURIComponent(agent):''}`;
+  const tb=document.getElementById('bcBreaks'), ti=document.getElementById('bcIdle');
+  tb.innerHTML=ti.innerHTML='<tr><td colspan="4" class="empty">Loading…</td></tr>';
+  try{
+    const r=await authFetch('/api/hourly/breaks?'+qs); const d=await r.json(); if(!d.ok) throw new Error(d.error);
+    tb.innerHTML=d.breaks.length?d.breaks.map(i=>{
+      const diff=i.late_min>0?`+${i.late_min}m late`:`${i.late_min}m early`, color=i.late_min>0?'var(--warn)':'var(--info)';
+      return `<tr><td>${bcWho(i)}</td><td class="mono">${i.scheduled_start?hrTime(i.scheduled_start):'—'}</td>
+        <td class="mono">${i.pressed_at?hrTime(i.pressed_at):'—'}</td>
+        <td><span class="num" style="color:${color};font-size:12px">${diff}</span></td></tr>`;
+    }).join(''):'<tr><td colspan="4" class="empty">✓ No off-schedule breaks</td></tr>';
+  }catch(e){ tb.innerHTML=`<tr><td colspan="4" class="empty">Error: ${esc(e.message)}</td></tr>`; }
+  try{
+    const r=await authFetch('/api/hourly/idle-log?'+qs); const d=await r.json(); if(!d.ok) throw new Error(d.error);
+    ti.innerHTML=d.idle.length?d.idle.map(i=>`<tr><td>${bcWho(i)}</td>
+      <td class="mono">${esc(i.from)}</td><td class="mono">${esc(i.to)}</td>
+      <td><span class="num" style="color:var(--warn)">${bcMins(i.idle_min)}</span></td></tr>`).join(''):'<tr><td colspan="4" class="empty">✓ No idle periods logged</td></tr>';
+  }catch(e){ ti.innerHTML=`<tr><td colspan="4" class="empty">Error: ${esc(e.message)}</td></tr>`; }
 }
 </script>
 </body>

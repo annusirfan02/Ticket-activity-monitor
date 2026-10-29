@@ -185,7 +185,6 @@ tr:hover td{background:rgba(255,255,255,.015)}
     <div class="tabs">
       <div class="tab active" data-tab="stats" onclick="switchTab('stats')">Ticket Stats</div>
       <div class="tab" data-tab="overdue" onclick="switchTab('overdue')">Overdue Tickets</div>
-      <div class="tab" data-tab="breaks" onclick="switchTab('breaks')">Break Compliance</div>
       <div class="tab" data-tab="agents" onclick="switchTab('agents')">Manage Agents</div>
       <div class="tab" data-tab="statuses" onclick="switchTab('statuses')">Manage Statuses</div>
       <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
@@ -218,32 +217,6 @@ tr:hover td{background:rgba(255,255,255,.015)}
         <div class="tbl-scroll"><table>
           <thead><tr><th>Ticket</th><th>Subject</th><th>Waiting Since</th><th>Status</th><th>Replied</th></tr></thead>
           <tbody id="overdueBody"><tr><td colspan="5" class="empty">Select an agent or view all</td></tr></tbody>
-        </table></div>
-      </div>
-    </div>
-
-    <!-- BREAKS -->
-    <div id="tab-breaks" class="hidden">
-      <div class="panel">
-        <div class="panel-head"><div class="panel-title">⚠️ Off-Schedule Break Takers (today)</div></div>
-        <div class="tbl-scroll"><table>
-          <thead><tr><th>Agent</th><th>Scheduled Break</th><th>Pressed At</th><th>Difference</th></tr></thead>
-          <tbody id="breaksBody"><tr><td colspan="4" class="empty">No off-schedule breaks today</td></tr></tbody>
-        </table></div>
-      </div>
-      <div class="panel">
-        <div class="panel-head">
-          <div class="panel-title">💤 Idle Periods During Shift (≥ threshold)</div>
-          <div style="display:flex;align-items:center;gap:8px">
-            <label class="mono" style="color:var(--dim)">Date:</label>
-            <input type="date" id="idleDate" onchange="loadIdle()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 11px;color:var(--text);font-family:var(--mono);font-size:12px"/>
-            <label class="mono" style="color:var(--dim)">Agent:</label>
-            <select id="idleAgent" onchange="loadIdle()" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 11px;color:var(--text);font-family:var(--mono);font-size:12px"><option value="">All agents</option></select>
-          </div>
-        </div>
-        <div class="tbl-scroll"><table>
-          <thead><tr><th>Agent</th><th>Inactive From</th><th>Until</th><th>Duration</th></tr></thead>
-          <tbody id="idleBody"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
         </table></div>
       </div>
     </div>
@@ -516,7 +489,7 @@ async function loadStatus(){
     hideErr();
     const r=await authFetch('/api/status'); const d=await r.json(); if(!d.ok)throw new Error(d.error);
     document.getElementById('lastChk').textContent=d.lastChecked?'Checked '+new Date(d.lastChecked).toLocaleTimeString('en-US',{hour12:true,timeZone:dashTZ()}):'—';
-    renderStats(d.agents); renderBreaks(d.breakIssues);
+    renderStats(d.agents);
     fillOverdueAgentDropdown(d.agents);
     firstStatusLoad=false;
   }catch(e){ showErr('Error: '+e.message); }
@@ -548,21 +521,6 @@ function renderStats(agents){
       <td><span class="num">${fmtHM(s.firstReplyMin)}</span></td>
       <td><span class="num o">${s.responseDue??0}</span></td>
       <td>${custom}</td></tr>`;
-  }).join('');
-}
-
-// RENDER BREAKS
-function renderBreaks(issues){
-  const tb=document.getElementById('breaksBody');
-  if(!issues?.length){tb.innerHTML='<tr><td colspan="4" class="empty">✓ No off-schedule breaks today</td></tr>';return;}
-  tb.innerHTML=issues.map(i=>{
-    const sched=i.scheduled_start?new Date(i.scheduled_start).toLocaleTimeString('en-US',{hour12:true,hour:'2-digit',minute:'2-digit',timeZone:dashTZ()}):'—';
-    const press=i.pressed_at?new Date(i.pressed_at).toLocaleTimeString('en-US',{hour12:true,hour:'2-digit',minute:'2-digit',timeZone:dashTZ()}):'—';
-    const diff=i.late_min>0?`+${i.late_min}m late`:`${i.late_min}m early`;
-    const color=i.late_min>0?'var(--orange)':'var(--info)';
-    return `<tr><td><div class="an">${esc(i.agent_name||i.agent_email)}</div><div class="ae">${esc(i.agent_email)}</div></td>
-      <td class="mono">${sched}</td><td class="mono">${press}</td>
-      <td><span style="color:${color};font-family:var(--mono);font-weight:600;font-size:12px">${diff}</span></td></tr>`;
   }).join('');
 }
 
@@ -608,7 +566,7 @@ async function loadAgents(){
         <button class="btn" onclick="toggleAgent('${esc(a.email)}',${!a.active})">${a.active?'Pause':'Resume'}</button>
         <button class="btn danger" onclick="delAgent('${esc(a.email)}')">Remove</button>
       </td></tr>`).join('');
-    renderStatusAgentPicker(); fillHistAgentDropdown(); fillIdleAgentDropdown();
+    renderStatusAgentPicker(); fillHistAgentDropdown();
   }catch(e){ showErr('Agents: '+e.message); }
 }
 async function addAgent(){
@@ -721,11 +679,10 @@ async function delStatus(id){
 // TABS
 function switchTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.dataset.tab===t));
-  ['stats','overdue','breaks','agents','statuses','history','reports','quality'].forEach(n=>document.getElementById('tab-'+n).classList.toggle('hidden',n!==t));
+  ['stats','overdue','agents','statuses','history','reports','quality'].forEach(n=>document.getElementById('tab-'+n).classList.toggle('hidden',n!==t));
   if(t==='quality') qOpen();
 
   if(t==='overdue')loadOverdue();
-  if(t==='breaks'){ const di=document.getElementById('idleDate'); if(di&&!di.value)di.value=new Date().toISOString().split('T')[0]; fillIdleAgentDropdown(); loadIdle(); }
   if(t==='agents')loadAgents();
   if(t==='statuses'){ loadFdStatuses(); loadStatuses(); }
   if(t==='history'){ fillHistAgentDropdown(); if(!histFrom){histRange(7);} }
@@ -1063,29 +1020,6 @@ function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 function fmtHM(mins){mins=Math.round(+mins||0);if(mins<=0)return '0m';const h=Math.floor(mins/60),m=mins%60;return h?(m?`${h}h ${m}m`:`${h}h`):`${m}m`;}
 // custom statuses matching this stay on the 24h window; others are current totals
 const A2P_WINDOW_RX=/a2p approval/i;
-// IDLE LOG
-function fillIdleAgentDropdown(){
-  const sel=document.getElementById('idleAgent'); if(!sel)return; const cur=sel.value;
-  sel.innerHTML='<option value="">All agents</option>'+dbAgents.map(a=>`<option value="${esc(a.email)}">${esc(a.name||a.email)}</option>`).join('');
-  sel.value=cur;
-}
-async function loadIdle(){
-  const tb=document.getElementById('idleBody'); if(!tb)return;
-  const date=document.getElementById('idleDate')?.value||'';
-  const agent=document.getElementById('idleAgent')?.value||'';
-  tb.innerHTML='<tr><td colspan="4" class="empty">Loading…</td></tr>';
-  try{
-    const qs=[]; if(date)qs.push('date='+encodeURIComponent(date)); if(agent)qs.push('agent='+encodeURIComponent(agent));
-    const r=await authFetch('/api/idle-log'+(qs.length?'?'+qs.join('&'):'')); const d=await r.json();
-    if(!d.ok)throw new Error(d.error);
-    if(!d.idle.length){tb.innerHTML='<tr><td colspan="4" class="empty">✓ No idle periods logged</td></tr>';return;}
-    tb.innerHTML=d.idle.map(i=>`<tr>
-      <td><div class="an">${esc(i.agent_name||i.agent_email)}</div><div class="ae">${esc(i.agent_email)}</div></td>
-      <td class="mono">${esc(i.from)}</td><td class="mono">${esc(i.to)}</td>
-      <td><span class="num o">${fmtHM(i.idle_min)}</span></td></tr>`).join('');
-  }catch(e){ tb.innerHTML=`<tr><td colspan="4" class="empty">Error: ${esc(e.message)}</td></tr>`; }
-}
-
 document.getElementById('loginPw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
 if(token)showApp();
 </script>

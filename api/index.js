@@ -978,9 +978,7 @@ app.get('/api/status', authMw, async (req,res)=>{
   try {
     const r = await runPoll();
     const a = r.agents;
-    const today = new Date().toISOString().split('T')[0];
-    const breakIssues = await D.getBreakLog(today);
-    res.json({ ok:true, lastChecked: mem.lastChecked, threshold: THRESHOLD_MIN, pollMins: POLL_MIN, stats: liveCounts(a), agents:a, breakIssues });
+    res.json({ ok:true, lastChecked: mem.lastChecked, threshold: THRESHOLD_MIN, pollMins: POLL_MIN, stats: liveCounts(a), agents:a });
   } catch(e){ console.error(e.message); res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -1386,8 +1384,18 @@ app.get('/api/late-shifts', authMw, async (req,res)=>{
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
-// ── IDLE LOG (inactive periods during shift) ──
-app.get('/api/idle-log', authMw, async (req,res)=>{
+// ── BREAK COMPLIANCE (shown on /hourly, behind its password) ──
+// Off-schedule breaks for a day
+app.get('/api/hourly/breaks', hourlyMw, async (req,res)=>{
+  try {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : new Date().toISOString().split('T')[0];
+    const agent = (req.query.agent || '').toLowerCase();
+    const rows = (await D.getBreakLog(date)).filter(r => !agent || (r.agent_email || '').toLowerCase() === agent);
+    res.json({ ok:true, date, breaks: rows });
+  } catch(e){ res.status(500).json({ok:false,error:e.message}); }
+});
+// Idle periods during shift
+app.get('/api/hourly/idle-log', hourlyMw, async (req,res)=>{
   try {
     const agent = req.query.agent||null;
     const rows = req.query.month

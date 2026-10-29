@@ -25,9 +25,6 @@
 .modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:18px 20px}
 .modal-head h3{font-size:18px;font-weight:800}
 .sec{font-size:14px;font-weight:800;padding:14px 20px 4px}
-.item{background:var(--row);border-radius:14px;border-left:4px solid var(--danger);padding:10px 14px;margin:6px 20px;font-size:13px;line-height:1.5}
-.tkt{color:var(--info);text-decoration:none;font-weight:800}
-.tkt:hover{text-decoration:underline}
 .page > .grid{margin-top:2px}
 .overlay.hidden{display:none}
 </style>
@@ -38,7 +35,7 @@
     <div class="brand"><div class="logo" aria-hidden="true">AM</div><div><div class="page-date">Weekly · Mon–Sun</div><h1 class="page-title">Tickets Seat Scorecard</h1></div></div>
     <button class="theme-btn" onclick="toggleTheme()">Theme</button>
   </div>
-  <div class="intro">Weekly measurables for the Tickets team (Mon–Sun). A new card is added automatically after each week ends. Click a card for the full report.</div>
+  <div class="intro">Weekly measurables for the Tickets team (Mon–Sun). A new card is added automatically after each week ends. Click a card for the full week.</div>
   <div id="grid" class="grid"><div class="empty">Loading…</div></div>
 </div>
 <div id="overlay" class="overlay hidden" onclick="if(event.target===this)closeCard()"><div class="modal" id="modal"></div></div>
@@ -92,9 +89,6 @@ function openCard(i){
     <td><span class="num">${pct(a.csat?.csatPct)}</span><div class="ae">${a.csat?.total?`${a.csat.negative} neg of ${a.csat.total}`:''}</div></td>
     <td><span class="num" style="color:${a.empathy?.missed?'var(--danger)':'inherit'}">${a.empathy?.upset?`${a.empathy.missed} of ${a.empathy.upset}`:'–'}</span><div class="ae">${a.empathy?.reviewed?`${a.empathy.reviewed} reviewed`:''}</div></td>
     <td><span class="num" style="color:${a.sop?.incorrect?'var(--danger)':'inherit'}">${a.sop?.covered?`${a.sop.incorrect} of ${a.sop.covered}`:'–'}</span><div class="ae">${a.sop?.reviewed?`${a.sop.reviewed} reviewed`:''}</div></td></tr>`).join('');
-  const tkt=it=>`<a class="tkt" href="${esc(it.url)}" target="_blank" rel="noopener">#${it.ticketId}</a> · ${esc(it.agent)} · ${esc(it.date?day(it.date):'')}`;
-  const emp=c.flagged.empathy.map(it=>`<div class="item">${tkt(it)}${it.handling?` · ${esc(it.handling)}`:''}<div style="color:var(--dim)">${esc(it.reason)}</div></div>`).join('');
-  const sop=c.flagged.sop.map(it=>`<div class="item">${tkt(it)}${it.topic?` · ${esc(it.topic)}`:''}<div>SOP: ${esc(it.sopRule)}</div><div style="color:var(--dim)">Agent: ${esc(it.agentAction)}</div></div>`).join('');
   document.getElementById('modal').innerHTML=`
     <div class="modal-head"><div><h3>Tickets Seat Scorecard · ${weekLabel(c)}</h3>
       <div class="ae" style="margin-top:4px">Saved ${new Date(c.generatedAt).toLocaleString('en-US',{timeZone:tz,month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:true})} · ${c.totals.resolved} resolved · ${c.totals.closed} closed</div></div>
@@ -104,8 +98,6 @@ function openCard(i){
     <div class="sec">By agent</div>
     <div class="tbl-scroll"><table><thead><tr><th>Agent</th><th>Resolved</th><th>Closed</th><th>SLA met</th><th>First reply</th><th>CSAT</th><th>Empathy missed</th><th>Against SOP</th></tr></thead>
       <tbody>${agents||'<tr><td colspan="8" class="empty">No activity this week</td></tr>'}</tbody></table></div>
-    <div class="sec">Empathy missed (${c.flagged.empathy.length})</div>${emp||'<div class="empty" style="padding:8px 18px">None</div>'}
-    <div class="sec">Resolved against the SOP (${c.flagged.sop.length})</div>${sop||'<div class="empty" style="padding:8px 18px">None</div>'}
     <div style="height:14px"></div>`;
   document.getElementById('overlay').classList.remove('hidden');
 }

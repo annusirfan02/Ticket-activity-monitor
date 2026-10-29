@@ -1352,7 +1352,7 @@ app.get('/api/hourly', hourlyMw, async (req,res)=>{
 
 // ── WEEKLY SCORECARD (Tickets seat): stored snapshots, newest first ──
 // /scorecard is a public, read-only page meant to be shared. Its data has no
-// agent emails; the snapshots themselves are only built by the cron or by an
+// agent emails or ticket details (stats only); the snapshots themselves are only built by the cron or by an
 // admin (generate, below).
 const scorecardTableMissing = (e) => /weekly_scorecards/.test(e.message) && /schema cache|does not exist/.test(e.message);
 app.get('/scorecard', (req,res)=>{
@@ -1362,7 +1362,8 @@ app.get('/scorecard', (req,res)=>{
 app.get('/api/public/scorecards', async (req,res)=>{
   try {
     const rows = await D.getScorecards(26);
-    const scorecards = rows.map(r => ({ ...r.data, agents: (r.data.agents || []).map(({ email, ...a }) => a) }));
+    // stats only: no agent emails and no flagged tickets
+    const scorecards = rows.map(({ data: { flagged, ...d } }) => ({ ...d, agents: (d.agents || []).map(({ email, ...a }) => a) }));
     res.json({ ok:true, tz: TZ, scorecards });
   } catch(e){
     if (scorecardTableMissing(e)) return res.status(503).json({ok:false,error:'Scorecard table is not set up yet — run the weekly_scorecards SQL from db/schema.sql in Supabase'});

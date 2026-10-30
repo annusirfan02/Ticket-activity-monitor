@@ -48,7 +48,7 @@
       </div>
     </div>
     <div class="mono" style="color:var(--dim);font-size:11px;padding:8px 18px 4px;line-height:1.6">
-      Each rostered shift on the chosen day, split into hours from the shift start. The last hour of every shift is not shown or counted.
+      Each rostered shift on the chosen day, split into hours from the shift start. In the last hour of a shift, tickets opened during that hour are not counted in its replies or reply time.
       Open tickets = the agent's tickets in Open status at the start of the hour (recorded hourly since this view went live).
       Reply time = working hours only. Times in <span id="hrTz"></span>.
     </div>
@@ -139,7 +139,7 @@ async function hrLoad(){
         <div class="mono" style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.06em">${label}</div>
         <div style="font-size:20px;font-weight:600;margin-top:4px">${val}</div><div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px">${sub||''}</div></div>`;
       const cards=`<div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 14px">
-        ${card('Shift',`${hrTime(s.start)} – ${hrTime(s.end)}`,`shown until ${hrTime(s.shownUntil)} · ${sm.hoursShown}h`)}
+        ${card('Shift',`${hrTime(s.start)} – ${hrTime(s.end)}`,`${sm.hoursShown}h`)}
         ${card('Clock-in',s.clockIn?hrTime(s.clockIn):'–','Deputy')}
         ${card('Avg open tickets',sm.avgOpen??'–',sm.snapshotsRecorded?`${sm.snapshotsRecorded} of ${sm.hoursShown} hours recorded`:'not recorded for this day')}
         ${card('Replies / hour',sm.repliesPerHour??'–',sm.replies!=null?`${sm.replies} replies`:'')}
@@ -147,7 +147,7 @@ async function hrLoad(){
         ${card('Break',hrMins(sm.breakMin),`${s.breaks.length} break${s.breaks.length===1?'':'s'}`)}
         ${card('Idle',hrMins(sm.idleMin),`${s.idle.length} period${s.idle.length===1?'':'s'}`)}</div>`;
       const rows=s.hours.map(h=>`<tr>
-        <td class="mono">${hrTime(h.start)} – ${hrTime(h.end)}</td>
+        <td class="mono">${hrTime(h.start)} – ${hrTime(h.end)}${h.last?`<div style="color:var(--dim);font-size:11px;margin-top:2px">last hour${h.newExcluded?` · ${h.newExcluded} new ticket${h.newExcluded===1?'':'s'} not counted`:' · new tickets not counted'}</div>`:''}</td>
         <td>${h.open==null?'<span class="empty-cell">not recorded</span>':`<div style="display:flex;align-items:center;gap:8px"><div style="height:8px;width:${Math.round(h.open/maxOpen*120)}px;background:var(--info);border-radius:4px"></div><span class="num">${h.open}</span></div>`}</td>
         <td><span class="num">${h.replies??'–'}</span></td>
         <td><span class="num">${hrMins(h.avgReplyMin)}</span></td>
@@ -156,7 +156,7 @@ async function hrLoad(){
       const list=(title,items,color)=>items.length?`<div class="mono" style="font-size:11px;margin-top:8px"><span style="color:var(--dim)">${title}:</span> ${items.map(x=>`<span style="color:${color}">${hrTime(x.start)}–${hrTime(x.end)}${x.ongoing?' (ongoing)':''}</span>`).join(' · ')}</div>`:'';
       return `${cards}<div class="tbl-scroll"><table>
         <thead><tr><th>Hour</th><th>Open tickets</th><th>Replies</th><th>Avg reply time</th><th>Break</th><th>Idle</th></tr></thead>
-        <tbody>${rows||'<tr><td colspan="6" class="empty">Shift is one hour or shorter, nothing to show after leaving out the last hour</td></tr>'}</tbody></table></div>
+        <tbody>${rows||'<tr><td colspan="6" class="empty">No hours in this shift</td></tr>'}</tbody></table></div>
         ${list('Breaks taken',s.breaks,'var(--purple)')}${list('Rostered breaks',s.plannedBreaks,'var(--dim)')}${list('Idle periods',s.idle,'var(--danger)')}`;
     }).join('<hr style="border:none;border-top:1px solid var(--border);margin:18px 0">');
   }catch(e){ box.innerHTML=`<div class="empty">Error: ${esc(e.message)}</div>`; }

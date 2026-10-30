@@ -6,9 +6,9 @@
 //   replies   — replies sent to customers in the hour, and their average
 //               working-hours reply time (response_events)
 //   breakMin  — minutes on break (Deputy timesheet), idleMin — minutes idle (idle_log)
-// In the LAST hour of a shift, tickets opened during that hour are left out of
-// the replies and reply time (an agent can't be expected to clear them before
-// the shift ends), going by the ticket's created_at in Freshdesk.
+// Every hour counts, the last one too: all the agent's replies are counted.
+// New work that arrives during an hour (new tickets, customer replies) is not
+// in its open count, which is taken at the start of the hour.
 const axios = require('axios');
 const D = require('./db');
 const A = require('./attendance');
@@ -16,19 +16,7 @@ const RS = require('./responses');
 
 const depBase = () => `https://${process.env.DEPUTY_DOMAIN}/api/v1`;
 const depHeaders = () => ({ Authorization: `Bearer ${process.env.DEPUTY_ACCESS_TOKEN}`, 'Content-Type': 'application/json', 'dp-meta-option': 'none' });
-const fdBase = () => `https://${process.env.FRESHDESK_DOMAIN}/api/v2`;
-const fdHeaders = () => ({ Authorization: 'Basic ' + Buffer.from(`${process.env.FRESHDESK_API_KEY}:X`).toString('base64') });
 const HOUR = 3600000, DAY = 86400000;
-
-// ticket id -> created_at (ms) from Freshdesk; a ticket that can't be read is left out
-async function ticketCreatedAt(ids) {
-  const out = {};
-  await Promise.all([...ids].map(async id => {
-    try { const { data } = await axios.get(`${fdBase()}/tickets/${id}`, { headers: fdHeaders(), timeout: 15000 }); out[id] = Date.parse(data.created_at); }
-    catch (e) { console.error(`hourly: ticket ${id}:`, e.response?.status || e.message); }
-  }));
-  return out;
-}
 const overlapMin = (a0, a1, b0, b1) => Math.max(0, Math.min(a1, b1) - Math.max(a0, b0)) / 60000;
 const dayShift = (date, n) => new Date(Date.parse(date + 'T00:00:00Z') + n * DAY).toISOString().slice(0, 10);
 
@@ -75,34 +63,21 @@ async function buildHourly(date, email) {
   const actualBreaks = sheets.flatMap(timesheetBreaks);
   const clockIns = sheets.filter(t => t.StartTime).map(t => ({ start: t.StartTime * 1000, end: t.EndTime && !t.IsInProgress ? t.EndTime * 1000 : null }));
 
-  // creation time of every ticket replied to in a shift's last hour
-  const lastHourIds = new Set();
-  for (const s of shifts) {
-    const ls = s.start + Math.floor((s.end - 1 - s.start) / HOUR) * HOUR;
-    for (const e of events || []) { const t = Date.parse(e.replied_at); if (t >= ls && t < s.end) lastHourIds.add(e.ticket_id); }
-  }
-  const created = lastHourIds.size ? await ticketCreatedAt(lastHourIds) : {};
-
   const out = shifts.map(s => {
     // hour slots from the shift start
     const slots = [];
     for (let h = s.start; h < s.end; h += HOUR) slots.push({ start: h, end: Math.min(h + HOUR, s.end) });
     const windowEnd = s.end;
     const lastStart = slots[slots.length - 1].start;
-    // tickets opened in the shift's last hour: not counted in that hour
-    const newInLast = new Set((events || []).filter(e => Date.parse(e.replied_at) >= lastStart && Date.parse(e.replied_at) < s.end
-      && created[e.ticket_id] >= lastStart).map(e => e.ticket_id));
-    const counted = (events || []).filter(e => !(Date.parse(e.replied_at) >= lastStart && newInLast.has(e.ticket_id)));
     const hours = slots.map(sl => {
       // snapshot taken closest to the start of the hour (within 40 min)
       const snap = (snaps || []).map(x => ({ x, d: Math.abs(Date.parse(x.snapshot_hour) - sl.start) }))
         .filter(o => o.d <= 40 * 60000).sort((p, q) => p.d - q.d)[0]?.x;
-      const ev = counted.filter(e => { const t = Date.parse(e.replied_at); return t >= sl.start && t < sl.end; });
+      const ev = (events || []).filter(e => { const t = Date.parse(e.replied_at); return t >= sl.start && t < sl.end; });
       const last = sl.start === lastStart;
       const rt = RS.responseTotals(ev);
       return {
         start: sl.start, end: sl.end, last,
-        newExcluded: last ? newInLast.size : 0,
         open: snap ? snap.open_count : null,
         replies: events ? ev.length : null,
         avgReplyMin: ev.length ? rt.avgResponseMin : null,
@@ -111,7 +86,7 @@ async function buildHourly(date, email) {
       };
     });
     const withOpen = hours.filter(h => h.open != null);
-    const shownEvents = counted.filter(e => { const t = Date.parse(e.replied_at); return t >= s.start && t < windowEnd; });
+    const shownEvents = (events || []).filter(e => { const t = Date.parse(e.replied_at); return t >= s.start && t < windowEnd; });
     const clip = (list) => list.map(x => ({ ...x, start: Math.max(x.start, s.start), end: Math.min(x.end, windowEnd) })).filter(x => x.end > x.start);
     return {
       start: s.start, end: s.end, shownUntil: windowEnd, hours,

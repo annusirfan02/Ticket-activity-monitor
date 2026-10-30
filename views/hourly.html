@@ -48,7 +48,7 @@
       </div>
     </div>
     <div class="mono" style="color:var(--dim);font-size:11px;padding:8px 18px 4px;line-height:1.6">
-      Each rostered shift on the chosen day, split into hours from the shift start. In the last hour of a shift, tickets opened during that hour are not counted in its replies or reply time.
+      Each rostered shift on the chosen day, split into hours from the shift start. Every hour counts, including the last one. Open tickets are counted at the start of each hour, so new tickets and customer replies that arrive during the hour aren't included.
       Open tickets = the agent's tickets in Open status at the start of the hour (recorded hourly since this view went live).
       Reply time = working hours only. Times in <span id="hrTz"></span>.
     </div>
@@ -147,7 +147,7 @@ async function hrLoad(){
         ${card('Break',hrMins(sm.breakMin),`${s.breaks.length} break${s.breaks.length===1?'':'s'}`)}
         ${card('Idle',hrMins(sm.idleMin),`${s.idle.length} period${s.idle.length===1?'':'s'}`)}</div>`;
       const rows=s.hours.map(h=>`<tr>
-        <td class="mono">${hrTime(h.start)} – ${hrTime(h.end)}${h.last?`<div style="color:var(--dim);font-size:11px;margin-top:2px">last hour${h.newExcluded?` · ${h.newExcluded} new ticket${h.newExcluded===1?'':'s'} not counted`:' · new tickets not counted'}</div>`:''}</td>
+        <td class="mono">${hrTime(h.start)} – ${hrTime(h.end)}${h.last?'<div style="color:var(--dim);font-size:11px;margin-top:2px">last hour</div>':''}</td>
         <td>${h.open==null?'<span class="empty-cell">not recorded</span>':`<div style="display:flex;align-items:center;gap:8px"><div style="height:8px;width:${Math.round(h.open/maxOpen*120)}px;background:var(--info);border-radius:4px"></div><span class="num">${h.open}</span></div>`}</td>
         <td><span class="num">${h.replies??'–'}</span></td>
         <td><span class="num">${hrMins(h.avgReplyMin)}</span></td>

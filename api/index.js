@@ -1361,7 +1361,7 @@ app.get('/scorecard', (req,res)=>{
 });
 app.get('/api/public/scorecards', async (req,res)=>{
   try {
-    const rows = await D.getScorecards(26);
+    const rows = await D.getScorecards(104);   // two years, for the yearly view
     // stats only: no agent emails and no flagged tickets
     const scorecards = rows.map(({ data: { flagged, ...d } }) => ({ ...d, agents: (d.agents || []).map(({ email, ...a }) => a) }));
     res.json({ ok:true, tz: TZ, scorecards });

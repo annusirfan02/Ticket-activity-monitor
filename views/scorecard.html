@@ -25,8 +25,16 @@
 .modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:18px 20px}
 .modal-head h3{font-size:18px;font-weight:800}
 .sec{font-size:14px;font-weight:800;padding:14px 20px 4px}
-.page > .grid{margin-top:2px}
+.page > .groups{margin-top:2px}
 .overlay.hidden{display:none}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.bar select{background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:9px 14px;color:var(--text);font-family:var(--sans);font-size:13px;font-weight:700;outline:none}
+.bar select:focus-visible{border-color:var(--ink)}
+.group{display:flex;flex-direction:column;gap:12px}
+.group-head{display:flex;align-items:baseline;gap:10px}
+.group-head h2{font-size:20px;font-weight:800;letter-spacing:-.01em}
+.group-head span{font-size:13px;color:var(--dim);font-weight:600}
+.groups{display:flex;flex-direction:column;gap:26px}
 </style>
 </head>
 <body>
@@ -35,8 +43,15 @@
     <div class="brand"><div class="logo" aria-hidden="true">AM</div><div><div class="page-date">Weekly · Mon–Sun</div><h1 class="page-title">Tickets Seat Scorecard</h1></div></div>
     <button class="theme-btn" onclick="toggleTheme()">Theme</button>
   </div>
-  <div class="intro">Weekly measurables for the Tickets team (Mon–Sun). A new card is added automatically after each week ends. Click a card for the full week.</div>
-  <div id="grid" class="grid"><div class="empty">Loading…</div></div>
+  <div class="intro">Weekly measurables for the Tickets team (Mon–Sun). A new card is added automatically after each week ends. Each week sits in the month that holds most of its days. Click a card for the full week.</div>
+  <div class="bar">
+    <div class="toggle-row" role="group" aria-label="View">
+      <button class="pill-tab active" id="vMonth" onclick="setView('month')">Monthly</button>
+      <button class="pill-tab" id="vYear" onclick="setView('year')">Yearly</button>
+    </div>
+    <label><span class="sr" style="position:absolute;left:-9999px">Period</span><select id="period" onchange="render()"></select></label>
+  </div>
+  <div id="grid" class="groups"><div class="empty">Loading…</div></div>
 </div>
 <div id="overlay" class="overlay hidden" onclick="if(event.target===this)closeCard()"><div class="modal" id="modal"></div></div>
 
@@ -60,17 +75,44 @@ function delta(m,prev){
   const txt=m.unit==='%'?`${d>0?'+':''}${d} pts`:`${d>0?'+':'−'}${fmtHM(Math.abs(d))}`;
   return `<span class="delta" style="color:${better?'var(--accent)':'var(--danger)'}">${d>0?'▲':'▼'} ${txt}</span>`;
 }
+// A Mon–Sun week belongs to the month holding at least 4 of its 7 days,
+// which is the month (and year) its Thursday falls in.
+const monthKey=c=>new Date(Date.parse(c.weekStart+'T00:00:00Z')+3*86400000).toISOString().slice(0,7);
+const monthName=k=>new Date(k+'-01T00:00:00Z').toLocaleDateString('en-US',{month:'long',year:'numeric',timeZone:'UTC'});
+let view='month';
+function cardHtml(i){
+  const c=cards[i];
+  return `<button class="card" onclick="openCard(${i})">
+      <div class="card-top"><div class="week">${weekLabel(c)}</div>${i===0?'<span class="badge-new">Latest</span>':''}</div>
+      <div class="sub">${c.totals.resolved+c.totals.closed} resolved/closed · ${c.agents.length} agents</div>
+      ${c.measurables.map(m=>`<div class="row"><span>${esc(m.label)}</span><span><span class="v" style="color:${color(m)}">${val(m)}</span>${delta(m,cards[i+1])}</span></div>`).join('')}
+    </button>`;
+}
+function setView(v){
+  view=v;
+  document.getElementById('vMonth').classList.toggle('active',v==='month');
+  document.getElementById('vYear').classList.toggle('active',v==='year');
+  const keys=[...new Set(cards.map(c=>v==='month'?monthKey(c):monthKey(c).slice(0,4)))];   // newest first
+  document.getElementById('period').innerHTML=keys.map(k=>`<option value="${k}">${v==='month'?monthName(k):k}</option>`).join('');
+  render();
+}
+function render(){
+  const grid=document.getElementById('grid'), sel=document.getElementById('period').value;
+  const idx=cards.map((c,i)=>i).filter(i=>view==='month'?monthKey(cards[i])===sel:monthKey(cards[i]).startsWith(sel));
+  const months=[...new Set(idx.map(i=>monthKey(cards[i])))];
+  grid.innerHTML=months.map(k=>{
+    const ws=idx.filter(i=>monthKey(cards[i])===k);
+    return `<section class="group"><div class="group-head"><h2>${monthName(k)}</h2><span>${ws.length} week${ws.length===1?'':'s'}</span></div>
+      <div class="grid">${ws.map(cardHtml).join('')}</div></section>`;
+  }).join('')||'<div class="empty">No weeks in this period</div>';
+}
 async function load(){
   const grid=document.getElementById('grid');
   try{
     const r=await fetch('/api/public/scorecards'); const d=await r.json(); if(!d.ok) throw new Error(d.error);
     cards=d.scorecards; tz=d.tz||tz;
     if(!cards.length){ grid.innerHTML='<div class="empty">No weekly scorecards yet — the first one appears after the week ends.</div>'; return; }
-    grid.innerHTML=cards.map((c,i)=>`<button class="card" onclick="openCard(${i})">
-      <div class="card-top"><div class="week">${weekLabel(c)}</div>${i===0?'<span class="badge-new">Latest</span>':''}</div>
-      <div class="sub">${c.totals.resolved+c.totals.closed} resolved/closed · ${c.agents.length} agents</div>
-      ${c.measurables.map(m=>`<div class="row"><span>${esc(m.label)}</span><span><span class="v" style="color:${color(m)}">${val(m)}</span>${delta(m,cards[i+1])}</span></div>`).join('')}
-    </button>`).join('');
+    setView('month');
   }catch(e){ grid.innerHTML=`<div class="empty">Could not load the scorecard: ${esc(e.message)}</div>`; }
 }
 function openCard(i){
